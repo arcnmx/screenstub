@@ -27,7 +27,7 @@ not currently possible to use DDC/CI over DisplayPort from the host.
 
 ## Guest Control
 
-As usually a DDC/CI connection is only present on the currently active input, so
+As usually a DDC/CI connection is only present on the currently active input,
 `screenstub` must issue a command to the guest operating system to instruct it
 to relinquish control over the screen to the host. QEMU Guest Agent and SSH are
 two common methods of executing commands inside of a guest.
