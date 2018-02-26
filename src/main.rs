@@ -35,7 +35,7 @@ use tokio_core::reactor::{Core, Handle, PollEvented};
 use tokio_file_unix::File as TokioFile;
 use tokio_io::codec::{FramedRead, FramedWrite};
 use tokio_process::CommandExt;
-use input::{InputEvent, EventRef, EventKind, EvdevHandle, UInputHandle, Bitmask, Key};
+use input::{InputEvent, EventRef, EventMut, EventKind, EvdevHandle, UInputHandle, Bitmask, Key};
 use futures::{future, Future, Stream, Sink};
 use futures::stream::{self, iter_ok};
 use futures::sync::mpsc;
@@ -153,6 +153,7 @@ struct XEventHandler {
     keys: Bitmask<Key>,
     triggers_press: HashMap<Key, Vec<Rc<Hotkey>>>,
     triggers_release: HashMap<Key, Vec<Rc<Hotkey>>>,
+    remap: HashMap<Key, Key>,
     ddc_input: Arc<ddc::SearchInput>,
     ddc_monitor: Arc<Mutex<ddc::Monitor>>,
 }
@@ -187,11 +188,12 @@ impl XEventHandler {
             xcb::BUTTON_INDEX_3 => Some(Key::ButtonRight),
             xcb::BUTTON_INDEX_4 => Some(Key::Button?),
             xcb::BUTTON_INDEX_5 => Some(Key::Button?),*/
-            xcb::BUTTON_INDEX_1 => Some(Key::Button0),
-            xcb::BUTTON_INDEX_2 => Some(Key::Button1),
-            xcb::BUTTON_INDEX_3 => Some(Key::Button2),
-            xcb::BUTTON_INDEX_4 => Some(Key::Button3),
-            xcb::BUTTON_INDEX_5 => Some(Key::Button4),
+            xcb::BUTTON_INDEX_1 => Some(Key::ButtonLeft),
+            xcb::BUTTON_INDEX_2 => Some(Key::ButtonRight),
+            xcb::BUTTON_INDEX_3 => Some(Key::ButtonMiddle),
+            xcb::BUTTON_INDEX_4 => Some(Key::ButtonWheel), // Key::ButtonGearDown
+            xcb::BUTTON_INDEX_5 => Some(Key::ButtonGearUp),
+            // 9 and 8 should be key::ButtonSide, Key::ButtonExtra? would be better to use fwd/back but qemu doesn't really support it looks like
             unk => None,
         }
     }
@@ -232,10 +234,10 @@ impl XEventHandler {
         ) as Box<_>
     }
 
-    fn ddc_host(&self) -> Box<Future<Item=(), Error=Error>> {
-        println!("TODO: ddc_host");
-        Box::new(future::ok(())) as Box<_>
-        //unimplemented!()
+    fn ddc_host(&self, handle: &Handle) -> Box<Future<Item=(), Error=Error>> {
+        // TODO: ugh
+        let child = Command::new("vm").args(&["windows", "video_input_host"]).spawn_async(handle);
+        Box::new(future::result(child).and_then(|c| c).map_err(Error::from).and_then(Error::from_exit_status)) as Box<_>
     }
 
     fn ddc_guest(&self, ddc_remote: &CpuPool) -> Box<Future<Item=(), Error=Error>> {
@@ -258,7 +260,7 @@ impl XEventHandler {
         Ok(match *event {
             UserEvent::ShowHost => {
                 Box::new(stream::futures_unordered(vec![
-                    self.ddc_host(),
+                    self.ddc_host(handle),
                     self.trigger_leave(leave_sender),
                 ]).for_each(|_| Ok(()))) as Box<_>
             },
@@ -296,15 +298,37 @@ impl XEventHandler {
         })
     }
 
+    fn handle_pre_input_event(&mut self, mut e: InputEvent) -> InputEvent {
+        match EventMut::new(&mut e) {
+            Ok(EventMut::Key(key)) => {
+                if let Some(remap) = self.remap.get(&key.key) {
+                    key.key = *remap;
+                }
+            },
+            _ => (),
+        }
+
+        e
+    }
+
     fn handle_input_event(&mut self, e: EventRef) -> stream::IterOk<vec::IntoIter<Rc<UserEvent>>, Error> {
         //println!("event {:?}", e);
 
         iter_ok(match e {
             EventRef::Key(key) => match key.key_state() {
                 input::KeyState::Released => {
+                    let mut events = Vec::new();
+                    if let Some(hotkeys) = self.triggers_release.get(&key.key) {
+                        for hotkey in hotkeys {
+                            if hotkey.triggers.iter().chain(hotkey.modifiers.iter()).all(|k| self.keys.get(*k)) {
+                                events.push(hotkey.event.clone());
+                            }
+                        }
+                    }
+
                     self.keys.clear(key.key);
 
-                    Default::default()
+                    events
                 },
                 input::KeyState::Pressed => {
                     self.keys.set(key.key);
@@ -332,6 +356,10 @@ impl XEventHandler {
 
     fn filter_evdev(&self, e: &InputEvent) -> bool {
         return self.grabbing;
+    }
+
+    fn filter_xevent(&self, e: &InputEvent) -> bool {
+        return !self.grabbing;
     }
 
     fn key_event(&mut self, key: Key, pressed: bool) -> Vec<XEventProcessed> {
@@ -481,7 +509,7 @@ fn main_result() -> Result<i32, Error> {
         triggers: vec![Key::KeyG],
         modifiers: vec![Key::KeyLeftMeta],
         event: Rc::new(UserEvent::ToggleGrab),
-    }, true);
+    }, false);
 
     let mut core = Core::new().unwrap();
     let handle = core.handle();
@@ -512,7 +540,7 @@ fn main_result() -> Result<i32, Error> {
         version: 1,
     };
 
-    let uinput_abs = [
+    /*let uinput_abs = vec![
         input::AbsoluteInfoSetup {
             axis: input::AbsoluteAxis::X,
             info: input::AbsoluteInfo {
@@ -535,7 +563,8 @@ fn main_result() -> Result<i32, Error> {
                 resolution: 1,
             },
         },
-    ];
+    ];*/
+    let mut uinput_abs = Vec::new();
 
     let (mut send_event, recv_event) = un_mpsc::channel::<InputEvent>(0x10);
     let (mut send_user, recv_user) = un_mpsc::channel::<Rc<UserEvent>>(0x10);
@@ -567,9 +596,14 @@ fn main_result() -> Result<i32, Error> {
             bits_rel.set(bit);
         }
 
+        /* TODO: fix this shit
         for bit in &evdev.absolute_bits()? {
             bits_abs.set(bit);
-        }
+            uinput_abs.push(input::AbsoluteInfoSetup {
+                axis: bit,
+                info: evdev.absolute_info(bit)?
+            });
+        }*/
 
         for bit in &evdev.misc_bits()? {
             bits_misc.set(bit);
@@ -602,6 +636,30 @@ fn main_result() -> Result<i32, Error> {
             .map_err(TerminalEvent::Error).or_else(|e| send_term.send(e).map(drop)).map_err(drop)
         );
     }
+    uinput_abs.push(
+        input::AbsoluteInfoSetup {
+            axis: input::AbsoluteAxis::X,
+            info: input::AbsoluteInfo {
+                value: 0,
+                minimum: 0,
+                maximum: 0x2000,
+                fuzz: 0,
+                flat: 0,
+                resolution: 1,
+            },
+        });
+    uinput_abs.push(
+        input::AbsoluteInfoSetup {
+            axis: input::AbsoluteAxis::Y,
+            info: input::AbsoluteInfo {
+                value: 0,
+                minimum: 0,
+                maximum: 0x2000,
+                fuzz: 0,
+                flat: 0,
+                resolution: 1,
+            },
+        });
 
     println!("props {:?}", props);
     for bit in &props {
@@ -679,6 +737,7 @@ fn main_result() -> Result<i32, Error> {
 
     {
         let mut xevents = xevents.clone();
+        let mut xevents2 = xevents.clone();
         let send_user = send_user.clone();
         let send_term = send_term.clone();
         let send_term2 = send_term.clone();
@@ -693,7 +752,9 @@ fn main_result() -> Result<i32, Error> {
                 XEventProcessed::User(e) => (Some(Rc::new(e)), None),
                 XEventProcessed::Input(e) => (None, Some(e)),
             }).unzip_spawn(&handle, |s|
-                s.filter_map(|e| e).map_err(|_| -> Error { unreachable!() }).forward(send_event).map_err(Error::from).map(drop)
+                s.filter_map(|e| e)
+                .filter(move |e| xevents2.borrow_mut().filter_xevent(e))
+                .map_err(|_| -> Error { unreachable!() }).forward(send_event).map_err(Error::from).map(drop)
                 .map_err(TerminalEvent::Error).or_else(|e| send_term2.send(e).map(drop)).map_err(drop)
             ).filter_map(|e| e).forward(send_user).map(drop)
             //.forward(send_event).map(drop).map_err(Error::from)
@@ -709,8 +770,12 @@ fn main_result() -> Result<i32, Error> {
     let uinput_write = FramedWrite::new(uinput_f, input::EventCodec::new());
     {
         let xevents = xevents.clone();
+        let xevents2 = xevents.clone();
         let send_term = send_term.clone();
         handle.spawn(recv_event.map_err(|_| -> Error { unreachable!() })
+            .map(move |e| {
+                xevents2.borrow_mut().handle_pre_input_event(e)
+            })
             .and_then(move |e| {
                 use std::slice;
                 let slice = unsafe { slice::from_raw_parts(e.as_raw() as *const _, 1) };
@@ -765,6 +830,13 @@ fn xmain(handle: &mut mpsc::Sender<XEvent>) -> Result<i32, Error> {
     let setup = conn.get_setup();
     let screen = setup.roots().nth(screen_num as usize).unwrap();
 
+    let atom_wm_state = xcb::intern_atom(&conn, true, "WM_STATE").get_reply()?.atom();
+    let atom_wm_protocols = xcb::intern_atom(&conn, true, "WM_PROTOCOLS").get_reply()?.atom();
+    let atom_wm_delete_window = xcb::intern_atom(&conn, true, "WM_DELETE_WINDOW").get_reply()?.atom();
+    let atom_net_wm_state = xcb::intern_atom(&conn, true, "_NET_WM_STATE").get_reply()?.atom();
+    let atom_net_wm_state_fullscreen = xcb::intern_atom(&conn, true, "_NET_WM_STATE_FULLSCREEN").get_reply()?.atom();
+    let atom_atom = xcb::intern_atom(&conn, true, "ATOM").get_reply()?.atom();
+
     let win = conn.generate_id();
     xcb::create_window(&conn,
         xcb::COPY_FROM_PARENT as u8,
@@ -787,14 +859,13 @@ fn xmain(handle: &mut mpsc::Sender<XEvent>) -> Result<i32, Error> {
             ),
         ]
     );
+
+    xcb::change_property(&conn, xcb::PROP_MODE_APPEND as _, win, atom_net_wm_state, atom_atom, 32, &[atom_net_wm_state_fullscreen]).request_check()?;
+
     xcb::map_window(&conn, win);
     conn.flush();
 
-    let atom_wm_state = xcb::intern_atom(&conn, true, "WM_STATE").get_reply()?.atom();
-    let atom_wm_protocols = xcb::intern_atom(&conn, true, "WM_PROTOCOLS").get_reply()?.atom();
-    let atom_wm_delete_window = xcb::intern_atom(&conn, true, "WM_DELETE_WINDOW").get_reply()?.atom();
-
-    xcb::change_property(&conn, xcb::PROP_MODE_REPLACE as _, win, atom_wm_protocols, 4, 32, &[atom_wm_delete_window]).request_check()?;
+    xcb::change_property(&conn, xcb::PROP_MODE_REPLACE as _, win, atom_wm_protocols, atom_atom, 32, &[atom_wm_delete_window]).request_check()?;
 
     let mut keys = xcb::get_keyboard_mapping(&conn, setup.min_keycode(), setup.max_keycode() - setup.min_keycode()).get_reply()?;
     let mut mods = xcb::get_modifier_mapping(&conn).get_reply()?;
@@ -849,6 +920,7 @@ fn xmain(handle: &mut mpsc::Sender<XEvent>) -> Result<i32, Error> {
                         };
                         match event.data().data32().get(0) {
                             Some(&atom) if atom == atom_wm_delete_window => {
+                                send_event(handle, XEvent::Visible(false))?;
                                 break
                             },
                             _ => (),
