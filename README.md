@@ -7,7 +7,9 @@ relaying frames.
 `screenstub` uses [DDC/CI](https://en.wikipedia.org/wiki/Display_Data_Channel)
 to switch monitor inputs when its window is visible and/or in focus. It is
 intended to be used in fullscreen with virtual workspaces, and switches to the
-VM input when its workspace is visible.
+VM input when its workspace is visible. Many options are available for working
+with input forwarding to a VM, and if used without DDC/CI it becomes similar to
+something like Synergy.
 
 
 ## Installation
