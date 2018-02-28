@@ -33,6 +33,7 @@
   - triggers: [KeyG]
     modifiers: [KeyLeftMeta]
     on_release: false # trigger on downpress of key
+    global: false # optionally trigger even when not in focus # CURRENTLY UNIMPLEMENTED
     events: # Select which events to trigger with this hotkey
     - toggle_grab: xcore # Standard Xorg window grab
     #- toggle_grab:

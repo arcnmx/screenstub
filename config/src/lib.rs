@@ -126,6 +126,8 @@ pub struct ConfigHotkey {
     pub events: Vec<ConfigEvent>,
     #[serde(default)]
     pub on_release: bool,
+    #[serde(default)]
+    pub global: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
