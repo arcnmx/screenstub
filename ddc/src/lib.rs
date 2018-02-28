@@ -80,6 +80,12 @@ impl Monitor {
         Monitor::Search(search)
     }
 
+    pub fn enumerate() -> Result<Vec<Self>, Error> {
+        DisplayInfo::enumerate()?.into_iter().map(|i|
+            Self::from_display_info(i, None)
+        ).collect()
+    }
+
     pub fn search(&self) -> &SearchDisplay {
         match *self {
             Monitor::Search(ref search) => search,
@@ -133,28 +139,36 @@ impl Monitor {
         }).map(|(&v, _)| v)
     }
 
-    fn find_display(&mut self) -> Result<Option<Monitor>, Error> {
+    pub fn from_display_info(info: DisplayInfo, search: Option<&mut SearchDisplay>) -> Result<Self, Error> {
+        let display = info.open()?;
+        let caps = display.capabilities()?;
+        let input_caps = caps.features.get(&FEATURE_CODE_INPUT).ok_or(DdcError::FeatureCodeNotFound)?;
+        let mut input_info = FeatureInfo::from_code(FEATURE_CODE_INPUT, caps.version)?;
+        let input_values = input_caps.into_iter().map(|&val|
+            (val, input_info.value_names.remove(&val).unwrap_or_else(|| "Unknown".into()))
+        ).collect();
+        let our_input = display.vcp_get_value(FEATURE_CODE_INPUT).ok().map(|v| v.value() as u8);
+
+        let search = if let Some(search) = search {
+            replace(search, Default::default())
+        } else {
+            Default::default()
+        };
+        Ok(Monitor::Display {
+            info: info,
+            display: display,
+            input_values: input_values,
+            our_input: our_input,
+            search: search,
+        })
+    }
+
+    fn find_display(&mut self) -> Result<Option<Self>, Error> {
         match *self {
             Monitor::Search(ref mut search) => {
                 let displays = DisplayInfo::enumerate()?;
                 if let Some(info) = displays.into_iter().find(|d| search.matches(d)) {
-                    let display = info.open()?;
-                    let caps = display.capabilities()?;
-                    let input_caps = caps.features.get(&FEATURE_CODE_INPUT).ok_or(DdcError::FeatureCodeNotFound)?;
-                    let mut input_info = FeatureInfo::from_code(FEATURE_CODE_INPUT, caps.version)?;
-                    let input_values = input_caps.into_iter().map(|&val|
-                        (val, input_info.value_names.remove(&val).unwrap_or_else(|| "Unknown".into()))
-                    ).collect();
-                    let our_input = display.vcp_get_value(FEATURE_CODE_INPUT).ok().map(|v| v.value() as u8);
-
-                    let mut search = replace(search, Default::default());
-                    Ok(Some(Monitor::Display {
-                        info: info,
-                        display: display,
-                        input_values: input_values,
-                        our_input: our_input,
-                        search: search,
-                    }))
+                    Self::from_display_info(info, Some(search)).map(Some)
                 } else {
                     Err(DdcError::DisplayNotFound.into())
                 }

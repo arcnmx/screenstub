@@ -32,9 +32,10 @@ this probably will need to be compiled from source.
 
 ## Configuration
 
-An [example configuration](config-sample.yml) is available to use as a starting
+An [example configuration](example-config.yml) is available to use as a starting
 point. There are a few specific items that need to be set up for everything to
-work.
+work. The `screenstub detect` command can be used to find information about
+DDC/CI capable monitors and their inputs.
 
 ### Host Control
 

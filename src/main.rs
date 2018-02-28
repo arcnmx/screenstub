@@ -76,6 +76,8 @@ fn main_result() -> Result<i32, Error> {
             .help("Configuration TOML file")
         ).subcommand(SubCommand::with_name("x")
             .about("Start the KVM with a fullscreen X window")
+        ).subcommand(SubCommand::with_name("detect")
+            .about("Detect available DDC/CI displays and their video inputs")
         ).setting(AppSettings::SubcommandRequiredElseHelp);
 
     let matches = app.get_matches();
@@ -246,6 +248,24 @@ fn main_result() -> Result<i32, Error> {
             // TODO: go back to host at this point before exiting
 
             xthread.join().unwrap()?; // TODO: get this properly
+
+            Ok(0)
+        },
+        #[cfg(feature = "with-ddcutil")]
+        ("detect", Some(..)) => {
+            Monitor::enumerate()?.into_iter().for_each(|m| {
+                let info = m.info().unwrap();
+                let inputs = m.inputs().unwrap();
+                let current_input = m.our_input().unwrap();
+                println!("Manufacturer: {}\nModel: {}\nSerial: {}",
+                    info.manufacturer_id(), info.model_name(), info.serial_number()
+                );
+                inputs.into_iter().for_each(|i|
+                    println!("  Input: {} = 0x{:02x}{}", i.1, i.0,
+                        if *i.0 == current_input { " (Current)" } else { "" }
+                    )
+                );
+            });
 
             Ok(0)
         },
