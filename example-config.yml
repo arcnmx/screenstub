@@ -18,8 +18,8 @@
     #name: HDMI-1
     #value: 0x11
   qemu:
-    #driver: input-linux
-    driver: virtio # Requires vioinput drivers installed in guest
+    driver: input-linux
+    #driver: virtio # Requires vioinput drivers installed in guest
     comm: qemucomm # https://github.com/arcnmx/qemucomm/blob/master/qemucomm must be in $PATH
     #comm: qmp # QMP socket type "mode=control" # CURRENTLY UNIMPLEMENTED
     #comm: console # QMP socket type "mode=readline" # CURRENTLY UNIMPLEMENTED

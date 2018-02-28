@@ -91,6 +91,7 @@ pub struct ConfigQemu {
 #[derive(Debug, Copy, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigQemuComm {
+    None,
     Qemucomm,
     QMP,
     Console,

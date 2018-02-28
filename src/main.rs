@@ -19,7 +19,7 @@ extern crate serde_yaml;
 extern crate clap;
 
 use std::collections::HashMap;
-use std::process::{exit, Command, ExitStatus};
+use std::process::{exit, Command, Stdio, ExitStatus};
 use std::thread::spawn;
 use std::cell::{Cell, RefCell};
 use std::sync::{Arc, Mutex};
@@ -399,6 +399,15 @@ impl UserProcess {
         }
     }
 
+    fn detect_guest(&mut self) -> Box<Future<Item=(), Error=Error>> {
+        match self.ddc_guest {
+            ConfigDdcGuest::None | ConfigDdcGuest::Exec(..) =>
+                Box::new(future::ok(())) as Box<_>,
+            ConfigDdcGuest::GuestExec(ref args) =>
+                Box::new(self.qemu.borrow_mut().guest_info()) as Box<_>,
+        }
+    }
+
     fn show_guest(&mut self) -> Vec<ProcessedUserEvent> {
         let showing_guest = self.showing_guest.clone();
         match self.ddc_host {
@@ -409,7 +418,8 @@ impl UserProcess {
                 let input = self.input_guest.clone();
                 let input_host = self.input_host.clone();
                 let input_host_value = self.input_host_value.clone();
-                vec![futures::sync::oneshot::spawn_fn(move || {
+                let ddc_pool = self.ddc_pool.clone();
+                vec![self.detect_guest().and_then(move |_| futures::sync::oneshot::spawn_fn(move || {
                     let mut ddc = ddc.lock().map_err(|e| format_err!("DDC mutex poisoned {:?}", e))?;
                     ddc.to_display()?;
                     if let Some(input) = ddc.our_input() {
@@ -426,7 +436,7 @@ impl UserProcess {
                     } else {
                         Err(format_err!("DDC guest input source not found"))
                     }
-                }, &self.ddc_pool)
+                }, &ddc_pool))
                 .inspect(move |&()| showing_guest.set(true))
                 .into()]
             },
@@ -539,6 +549,9 @@ impl Qemu {
     // TODO: none of these need to be mut probably?
     pub fn guest_exec<I: IntoIterator<Item=S>, S: AsRef<OsStr>>(&mut self, args: I) -> Box<Future<Item=(), Error=Error>> {
         match self.comm {
+            ConfigQemuComm::None => {
+                Box::new(future::ok(())) as Box<_>
+            },
             ConfigQemuComm::Qemucomm => {
                 if let Some(ga) = self.ga.as_ref() {
                     exec(&self.handle,
@@ -546,6 +559,27 @@ impl Qemu {
                             .iter().map(|&s| s.to_owned())
                         .chain(args.into_iter().map(|s| s.as_ref().to_string_lossy().into_owned()))
                     )
+                } else {
+                    Box::new(future::err(format_err!("QEMU Guest Agent socket not provided"))) as Box<_>
+                }
+            },
+            ConfigQemuComm::QMP => {
+                unimplemented!()
+            },
+            ConfigQemuComm::Console => {
+                unimplemented!()
+            },
+        }
+    }
+
+    pub fn guest_info(&mut self) -> Box<Future<Item=(), Error=Error>> {
+        match self.comm {
+            ConfigQemuComm::None => {
+                Box::new(future::ok(())) as Box<_>
+            },
+            ConfigQemuComm::Qemucomm => {
+                if let Some(ga) = self.ga.as_ref() {
+                    exec(&self.handle, ["qemucomm", "-g", &ga, "info"].iter().cloned())
                 } else {
                     Box::new(future::err(format_err!("QEMU Guest Agent socket not provided"))) as Box<_>
                 }
@@ -569,6 +603,9 @@ impl Qemu {
         };
 
         match self.comm {
+            ConfigQemuComm::None => {
+                Box::new(future::ok(())) as Box<_>
+            },
             ConfigQemuComm::Qemucomm => {
                 if let Some(qmp) = self.qmp.as_ref() {
                     exec(&self.handle, ["qemucomm", "-q", &qmp, command, driver, &id[..], &device].iter().cloned())
@@ -594,6 +631,9 @@ impl Qemu {
         };
 
         match self.comm {
+            ConfigQemuComm::None => {
+                Box::new(future::ok(())) as Box<_>
+            },
             ConfigQemuComm::Qemucomm => {
                 if let Some(qmp) = self.qmp.as_ref() {
                     exec(&self.handle, ["qemucomm", "-q", &qmp, command, &id[..]].iter().cloned())
@@ -612,6 +652,9 @@ impl Qemu {
 
     pub fn guest_shutdown(&mut self, mode: QemuShutdownMode) -> Box<Future<Item=(), Error=Error>> {
         match self.comm {
+            ConfigQemuComm::None => {
+                Box::new(future::ok(())) as Box<_>
+            },
             ConfigQemuComm::Qemucomm => {
                 let mode = match mode {
                     QemuShutdownMode::Shutdown => None,
@@ -656,7 +699,11 @@ fn exec<I: IntoIterator<Item=S>, S: AsRef<OsStr>>(ex: &Handle, args: I) -> Box<F
 
     let mut args = args.into_iter();
     if let Some(cmd) = args.next() {
-        let child = Command::new(cmd).args(args).spawn_async(ex);
+        let child = Command::new(cmd)
+            .args(args)
+            .stdout(Stdio::null())
+            .stdin(Stdio::null())
+            .spawn_async(ex);
         Box::new(future::result(child)
             .and_then(|c| c).map_err(Error::from)
             .and_then(exit_status_error)
