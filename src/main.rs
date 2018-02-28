@@ -238,7 +238,7 @@ fn main_result() -> Result<i32, Error> {
                         ProcessedUserEvent::UserEvent(e) => Ok(e),
                         ProcessedUserEvent::XRequest(x) => Err(format_err!("event {:?} cannot be processed at exit", x)),
                     })
-                ).for_each(|_| Ok(()))
+                ).and_then(|e| e).for_each(|()| Ok(()))
             ) {
                 error!("Failed to run exit events: {} {:?}", e, e);
             }
