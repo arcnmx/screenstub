@@ -14,7 +14,7 @@
   guest_source: # Can be automatically detected, but best to fill in if monitor has more than two inputs
     name: DisplayPort-1
     #value: 0x0f # can also specify raw VCP value
-  host_source: # Usually will be automatically detected and not necessary to configure this
+  #host_source: # Usually will be automatically detected and not necessary to configure this
     #name: HDMI-1
     #value: 0x11
   qemu:
