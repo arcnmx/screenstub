@@ -430,7 +430,7 @@ impl XContext {
                     },
                     Some(&atom) => {
                         let atom = xcb::get_atom_name(&self.conn, atom).get_reply();
-                        warn!("unknown X client message {:?}",
+                        info!("unknown X client message {:?}",
                             atom.as_ref().map(|a| a.name()).unwrap_or("UNKNOWN")
                         );
                         None
@@ -467,7 +467,7 @@ impl XContext {
                     },
                     atom => {
                         let atom = xcb::get_atom_name(&self.conn, atom).get_reply();
-                        warn!("unknown property notify {:?}",
+                        info!("unknown property notify {:?}",
                             atom.as_ref().map(|a| a.name()).unwrap_or("UNKNOWN")
                         );
                         None
@@ -540,7 +540,7 @@ impl XContext {
                 Some(XEvent::State(self.state.clone()))
             },
             _ => {
-                warn!("unknown X event {}", event.response_type());
+                info!("unknown X event {}", event.response_type());
                 None
             },
         })
