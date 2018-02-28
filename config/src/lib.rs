@@ -139,7 +139,8 @@ pub enum ConfigEvent {
     Ungrab(ConfigGrabMode),
     UnstickHost,
     UnstickGuest,
-    Poweroff,
+    Shutdown,
+    Reboot,
     Exit,
 }
 

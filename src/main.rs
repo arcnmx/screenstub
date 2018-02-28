@@ -484,8 +484,11 @@ impl UserProcess {
             ConfigEvent::UnstickHost => {
                 vec![xreq(XRequest::UnstickHost)]
             }
-            ConfigEvent::Poweroff => {
-                user(self.qemu.borrow_mut().guest_poweroff())
+            ConfigEvent::Shutdown => {
+                user(self.qemu.borrow_mut().guest_shutdown(QemuShutdownMode::Shutdown))
+            },
+            ConfigEvent::Reboot => {
+                user(self.qemu.borrow_mut().guest_shutdown(QemuShutdownMode::Reboot))
             },
             ConfigEvent::Exit => {
                 vec![xreq(XRequest::Quit)]
@@ -587,11 +590,17 @@ impl Qemu {
         }
     }
 
-    pub fn guest_poweroff(&mut self) -> Box<Future<Item=(), Error=Error>> {
+    pub fn guest_shutdown(&mut self, mode: QemuShutdownMode) -> Box<Future<Item=(), Error=Error>> {
         match self.comm {
             ConfigQemuComm::Qemucomm => {
-                if let Some(qmp) = self.qmp.as_ref() {
-                    exec(&self.handle, ["qemucomm", "-q", &qmp, "poweroff"].iter().cloned())
+                let mode = match mode {
+                    QemuShutdownMode::Shutdown => None,
+                    QemuShutdownMode::Reboot => Some("-r"),
+                    QemuShutdownMode::Halt => Some("-h"),
+                };
+
+                if let Some(ga) = self.ga.as_ref() {
+                    exec(&self.handle, ["qemucomm", "-g", &ga, "shutdown", mode.unwrap_or("ignore")].iter().cloned())
                 } else {
                     Box::new(future::err(format_err!("QEMU QMP socket not provided"))) as Box<_>
                 }
@@ -604,6 +613,12 @@ impl Qemu {
             },
         }
     }
+}
+
+enum QemuShutdownMode {
+    Shutdown,
+    Reboot,
+    Halt,
 }
 
 fn exec<I: IntoIterator<Item=S>, S: AsRef<OsStr>>(ex: &Handle, args: I) -> Box<Future<Item=(), Error=Error>> {
