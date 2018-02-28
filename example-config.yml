@@ -45,6 +45,7 @@
     #- toggle_show # switch the current display
     #- unstick_guest # causes all held keys to be released in the guest
     #- poweroff # safely shuts the guest system down
+    #- exit # quits screenstub
   - triggers: [KeyY]
     modifiers: [KeyLeftMeta]
     events:

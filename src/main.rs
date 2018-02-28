@@ -487,6 +487,9 @@ impl UserProcess {
             ConfigEvent::Poweroff => {
                 user(self.qemu.borrow_mut().guest_poweroff())
             },
+            ConfigEvent::Exit => {
+                vec![xreq(XRequest::Quit)]
+            }
         }
     }
 }

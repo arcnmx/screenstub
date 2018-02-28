@@ -140,6 +140,7 @@ pub enum ConfigEvent {
     UnstickHost,
     UnstickGuest,
     Poweroff,
+    Exit,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
