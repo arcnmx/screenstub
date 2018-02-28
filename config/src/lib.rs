@@ -33,15 +33,12 @@ pub struct ConfigScreen {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConfigDdcHost {
-    #[serde(rename = "none")]
     None,
-    #[serde(rename = "libddcutil")]
     #[cfg(feature = "with-ddcutil")]
     Libddcutil,
-    #[serde(rename = "ddcutil")]
     Ddcutil,
-    #[serde(rename = "exec")]
     Exec(Vec<String>),
 }
 
@@ -58,12 +55,10 @@ impl Default for ConfigDdcHost {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConfigDdcGuest {
-    #[serde(rename = "none")]
     None,
-    #[serde(rename = "guest_exec")]
     GuestExec(Vec<String>),
-    #[serde(rename = "exec")]
     Exec(Vec<String>),
 }
 
@@ -94,12 +89,10 @@ pub struct ConfigQemu {
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConfigQemuComm {
-    #[serde(rename = "qemucomm")]
     Qemucomm,
-    #[serde(rename = "qmp")]
     QMP,
-    #[serde(rename = "console")]
     Console,
 }
 
@@ -110,10 +103,9 @@ impl Default for ConfigQemuComm {
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ConfigQemuDriver {
-    #[serde(rename = "input-linux")]
     InputLinux,
-    #[serde(rename = "virtio")]
     Virtio,
 }
 
@@ -136,38 +128,27 @@ pub struct ConfigHotkey {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConfigEvent {
-    #[serde(rename = "exec")]
     Exec(Vec<String>),
-    #[serde(rename = "show_host")]
     ShowHost,
-    #[serde(rename = "show_guest")]
     ShowGuest,
-    #[serde(rename = "toggle_show")]
     ToggleShow,
-    #[serde(rename = "toggle_grab")]
     ToggleGrab(ConfigGrab),
-    #[serde(rename = "grab")]
     Grab(ConfigGrab),
-    #[serde(rename = "ungrab")]
     Ungrab(ConfigGrabMode),
-    #[serde(rename = "unstick_host")]
     UnstickHost,
-    #[serde(rename = "unstick_guest")]
     UnstickGuest,
-    #[serde(rename = "poweroff")]
     Poweroff,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ConfigGrab {
-    #[serde(rename = "xcore")]
     XCore,
-    #[serde(rename = "xdevice")]
     XDevice {
         devices: Vec<String>,
     },
-    #[serde(rename = "evdev")]
     Evdev {
         devices: Vec<String>,
     },
@@ -190,12 +171,10 @@ impl Default for ConfigGrab {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ConfigGrabMode {
-    #[serde(rename = "evdev")]
     Evdev,
-    #[serde(rename = "xdevice")]
     XDevice,
-    #[serde(rename = "xcore")]
     XCore,
 }
 
