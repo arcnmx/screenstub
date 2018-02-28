@@ -1,3 +1,4 @@
+#[cfg(feature = "ddcutil")]
 extern crate ddcutil;
 extern crate failure;
 #[macro_use]
@@ -5,8 +6,13 @@ extern crate failure_derive;
 
 use std::collections::HashMap;
 use std::mem::replace;
+#[cfg(feature = "ddcutil")]
 use ddcutil::{DisplayInfo, DisplayPath, Display, FeatureInfo, FeatureCode};
 use failure::Error;
+
+#[cfg(not(feature = "ddcutil"))]
+type FeatureCode = u8;
+
 
 #[derive(Fail, Debug)]
 pub enum DdcError {
@@ -23,7 +29,10 @@ pub struct SearchDisplay {
     pub manufacturer_id: Option<String>,
     pub model_name: Option<String>,
     pub serial_number: Option<String>,
+    #[cfg(feature = "ddcutil")]
     pub path: Option<DisplayPath>,
+    #[cfg(not(feature = "ddcutil"))]
+    pub path: Option<()>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -32,6 +41,7 @@ pub struct SearchInput {
     pub name: Option<String>,
 }
 
+#[cfg(feature = "ddcutil")]
 impl SearchDisplay {
     pub fn matches(&self, info: &DisplayInfo) -> bool {
         let matches = [
@@ -50,6 +60,7 @@ impl SearchDisplay {
 }
 
 #[derive(Debug)]
+#[cfg(feature = "ddcutil")]
 pub enum Monitor {
     #[doc(hidden)]
     Search(SearchDisplay),
@@ -63,6 +74,7 @@ pub enum Monitor {
     },
 }
 
+#[cfg(feature = "ddcutil")]
 impl Monitor {
     pub fn new(search: SearchDisplay) -> Self {
         Monitor::Search(search)
@@ -187,6 +199,7 @@ impl Monitor {
     }
 }
 
+#[cfg(feature = "ddcutil")]
 impl Default for Monitor {
     fn default() -> Self {
         Self::new(Default::default())

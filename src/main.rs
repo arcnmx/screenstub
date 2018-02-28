@@ -46,7 +46,9 @@ use config::{
     ConfigQemuDriver, ConfigQemuComm,
 };
 use event::{Hotkey, UserEvent, ProcessedXEvent};
-use ddc::{SearchDisplay, SearchInput, Monitor};
+use ddc::{SearchDisplay, SearchInput};
+#[cfg(feature = "with-ddcutil")]
+use ddc::Monitor;
 use x::XRequest;
 
 fn main() {
@@ -312,6 +314,7 @@ pub struct UserProcess {
     input_host_value: Arc<AtomicUsize>,
     ddc_host: ConfigDdcHost,
     ddc_guest: ConfigDdcGuest,
+    #[cfg(feature = "with-ddcutil")]
     ddc: Arc<Mutex<Monitor>>,
     qemu: Rc<RefCell<Qemu>>,
 }
@@ -327,6 +330,7 @@ impl UserProcess {
             input_host_value: Arc::new(AtomicUsize::new(0x100)),
             ddc_host: ddc.host,
             ddc_guest: ddc.guest,
+            #[cfg(feature = "with-ddcutil")]
             ddc: Arc::new(Mutex::new(Monitor::new(display))),
             ddc_pool: ddc_pool,
             qemu: qemu,
@@ -379,6 +383,7 @@ impl UserProcess {
         let showing_guest = self.showing_guest.clone();
         match self.ddc_host {
             ConfigDdcHost::None => vec![future::ok(()).into()],
+            #[cfg(feature = "with-ddcutil")]
             ConfigDdcHost::Libddcutil => {
                 let ddc = self.ddc.clone();
                 let input = self.input_guest.clone();

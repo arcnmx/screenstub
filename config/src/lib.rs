@@ -37,6 +37,7 @@ pub enum ConfigDdcHost {
     #[serde(rename = "none")]
     None,
     #[serde(rename = "libddcutil")]
+    #[cfg(feature = "with-ddcutil")]
     Libddcutil,
     #[serde(rename = "ddcutil")]
     Ddcutil,

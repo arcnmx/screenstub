@@ -3,6 +3,9 @@ name = "screenstub-ddc"
 version = "0.0.1"
 
 [dependencies]
-ddcutil = "^0.0.3"
+ddcutil = { version = "^0.0.3", optional = true }
 failure = "^0.1.1"
 failure_derive = "^0.1.1"
+
+[features]
+with-ddcutil = ["ddcutil"]

@@ -22,3 +22,7 @@ clap = "^2.30.0"
 env_logger = "^0.5.4"
 log = "^0.4.1"
 serde_yaml = "^0.7.3"
+
+[features]
+with-ddcutil = ["screenstub-ddc/with-ddcutil", "screenstub-config/with-ddcutil"]
+default = ["with-ddcutil"]
