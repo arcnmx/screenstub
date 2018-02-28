@@ -1,0 +1,63 @@
+- ddc:
+    host: libddcutil # Use libddcutil (recommended default)
+    #host: ddcutil # Use ddcutil CLI instead # CURRENTLY UNIMPLEMENTED
+    #host:
+    #  exec: [ddccontrol, -r, "0x60", -w, "{}", /dev/i2c-5]
+    guest: # configure how to switch back from the guest
+      guest_exec: ["C:/ScreenBright.exe", "-set", "0x60", "{}"] # "{}" is for decimal values
+      #guest_exec: ["C:/ddcset.exe", "0x60", "0x{:x}"] # or use "{:x}" for prefixless hex
+      #exec: ["ssh", "user@vm", "ddcutil", "setvcp", "0x60", "{}"] # system commands can also be used
+  monitor:
+    manufacturer: GSM
+    model: LG Ultra HD
+    #serial: "..."
+  guest_source: # Can be automatically detected, but best to fill in if monitor has more than two inputs
+    name: DisplayPort-1
+    #value: 0x0f # can also specify raw VCP value
+  host_source: # Usually will be automatically detected and not necessary to configure this
+    #name: HDMI-1
+    #value: 0x11
+  qemu:
+    #driver: input-linux
+    driver: virtio # Requires vioinput drivers installed in guest
+    comm: qemucomm # https://github.com/arcnmx/qemucomm/blob/master/qemucomm must be in $PATH
+    #comm: qmp # QMP socket type "mode=control" # CURRENTLY UNIMPLEMENTED
+    #comm: console # QMP socket type "mode=readline" # CURRENTLY UNIMPLEMENTED
+    qmp_socket: /run/vfio/qmp # path to QMP socket
+    ga_socket: /run/vfio/qga # path to Guest Agent socket
+  key_remap: # Arbitrary keys can be remapped in the guest
+    # See https://github.com/arcnmx/input-linux-rs/blob/master/src/keys.rs for a list of key names available (mouse buttons can also be used)
+    KeyLeftMeta: KeyReserved # disable the windows key
+    KeyRightAlt: KeyLeftMeta # remap right alt to trigger the windows key
+  hotkeys: # Trigger various events on key combinations
+  - triggers: [KeyG]
+    modifiers: [KeyLeftMeta]
+    on_release: false # trigger on downpress of key
+    events: # Select which events to trigger with this hotkey
+    - toggle_grab: xcore # Standard Xorg window grab
+    #- toggle_grab:
+    #    xdevice: # CURRENTLY UNIMPLEMENTED
+    #      devices: # Only grab specific devices from Xorg
+    #      - "..."
+    #- exec: [echo, hi] # Execute an arbitrary system command
+    #- show_host # switch to the host display
+    #- show_guest # switch to the guest display
+    #- toggle_show # switch the current display
+    #- unstick_guest # causes all held keys to be released in the guest
+    #- poweroff # safely shuts the guest system down
+  - triggers: [KeyY]
+    modifiers: [KeyLeftMeta]
+    events:
+    - toggle_grab:
+        evdev: # CURRENTLY UNIMPLEMENTED
+          devices: # List of devices to forward to guest
+          - /dev/input/by-id/etc
+    - unstick_host # force-depress all Xorg keys (prevents keys getting stuck)
+  - triggers: [KeyT]
+    modifiers: [KeyLeftMeta]
+    on_release: false
+    events:
+    - toggle_show
+  exit_events: # Events to trigger on window close / exit
+  - show_host
+  #- poweroff

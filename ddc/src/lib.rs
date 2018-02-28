@@ -1,12 +1,25 @@
+extern crate ddcutil;
+extern crate failure;
+#[macro_use]
+extern crate failure_derive;
+
 use std::collections::HashMap;
 use std::mem::replace;
 use ddcutil::{DisplayInfo, DisplayPath, Display, FeatureInfo, FeatureCode};
-use Error;
+use failure::Error;
+
+#[derive(Fail, Debug)]
+pub enum DdcError {
+    #[fail(display = "Display not found")]
+    DisplayNotFound,
+    #[fail(display = "Feature code not found")]
+    FeatureCodeNotFound,
+}
 
 const FEATURE_CODE_INPUT: FeatureCode = 0x60;
 
 #[derive(Debug, Clone, Default)]
-pub struct Search {
+pub struct SearchDisplay {
     pub manufacturer_id: Option<String>,
     pub model_name: Option<String>,
     pub serial_number: Option<String>,
@@ -19,7 +32,7 @@ pub struct SearchInput {
     pub name: Option<String>,
 }
 
-impl Search {
+impl SearchDisplay {
     pub fn matches(&self, info: &DisplayInfo) -> bool {
         let matches = [
             (&info.manufacturer_id(), &self.manufacturer_id),
@@ -39,23 +52,23 @@ impl Search {
 #[derive(Debug)]
 pub enum Monitor {
     #[doc(hidden)]
-    Search(Search),
+    Search(SearchDisplay),
     #[doc(hidden)]
     Display {
         info: DisplayInfo,
         display: Display,
         input_values: HashMap<u8, String>,
         our_input: Option<u8>,
-        search: Search,
+        search: SearchDisplay,
     },
 }
 
 impl Monitor {
-    pub fn new(search: Search) -> Self {
+    pub fn new(search: SearchDisplay) -> Self {
         Monitor::Search(search)
     }
 
-    pub fn search(&self) -> &Search {
+    pub fn search(&self) -> &SearchDisplay {
         match *self {
             Monitor::Search(ref search) => search,
             Monitor::Display { ref search, .. } => search,
@@ -91,7 +104,7 @@ impl Monitor {
     }
 
     pub fn match_input(&self, search: &SearchInput) -> Option<u8> {
-        self.other_inputs().into_iter().find(|&(other_v, other_name)| {
+        self.inputs().unwrap_or(&Default::default()).iter().find(|&(&other_v, other_name)| {
             if let Some(v) = search.value {
                 if other_v != v {
                     return false
@@ -105,7 +118,7 @@ impl Monitor {
             }
 
             true
-        }).map(|(v, _)| v)
+        }).map(|(&v, _)| v)
     }
 
     fn find_display(&mut self) -> Result<Option<Monitor>, Error> {
@@ -115,10 +128,8 @@ impl Monitor {
                 if let Some(info) = displays.into_iter().find(|d| search.matches(d)) {
                     let display = info.open()?;
                     let caps = display.capabilities()?;
-                    let (input_caps, mut input_info) = caps.features.get(&FEATURE_CODE_INPUT).ok_or(Error::DdcNotFound).and_then(|c|
-                        FeatureInfo::from_code(FEATURE_CODE_INPUT, caps.version)
-                            .map(|i| (c, i)).map_err(From::from)
-                    )?;
+                    let input_caps = caps.features.get(&FEATURE_CODE_INPUT).ok_or(DdcError::FeatureCodeNotFound)?;
+                    let mut input_info = FeatureInfo::from_code(FEATURE_CODE_INPUT, caps.version)?;
                     let input_values = input_caps.into_iter().map(|&val|
                         (val, input_info.value_names.remove(&val).unwrap_or_else(|| "Unknown".into()))
                     ).collect();
@@ -133,7 +144,7 @@ impl Monitor {
                         search: search,
                     }))
                 } else {
-                    Err(Error::DdcNotFound)
+                    Err(DdcError::DisplayNotFound.into())
                 }
             },
             Monitor::Display { .. } => Ok(None),
@@ -161,7 +172,7 @@ impl Monitor {
         self.to_display()?;
 
         match *self {
-            Monitor::Search(..) => Err(Error::DdcNotFound),
+            Monitor::Search(..) => Err(DdcError::DisplayNotFound.into()),
             Monitor::Display { ref display, .. } => Ok(display),
         }
     }

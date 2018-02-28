@@ -1,0 +1,9 @@
+[package]
+name = "screenstub-x"
+version = "0.0.1"
+
+[dependencies]
+futures = "^0.1.18"
+failure = "^0.1.1"
+xcb = { version = "^0.8.1", features = ["xtest", "xkb"] }
+log = "^0.4.1"

@@ -1,1017 +1,624 @@
-extern crate void;
-extern crate xcb;
-extern crate mio;
 #[macro_use]
+extern crate log;
+extern crate env_logger;
 extern crate futures;
 extern crate futures_cpupool;
-extern crate input_linux as input;
-extern crate tokio_file_unix;
-extern crate tokio_process;
-extern crate tokio_core;
-extern crate tokio_io;
 #[macro_use]
-extern crate quick_error;
-extern crate ddcutil;
+extern crate failure;
+extern crate input_linux as input;
+extern crate screenstub_uinput as uinput;
+extern crate screenstub_config as config;
+extern crate screenstub_event as event;
+extern crate screenstub_ddc as ddc;
+extern crate screenstub_x as x;
+extern crate tokio_unzip;
+extern crate tokio_timer;
+extern crate tokio_core;
+extern crate tokio_process;
+extern crate serde_yaml;
+extern crate clap;
 
-mod error;
-mod fd;
-use fd::Fd;
-mod send_async;
-use send_async::StreamUnzipExt;
-mod ddc;
-
-use error::Error;
-use std::thread::spawn;
-use std::process::exit;
-use std::{fs, vec, iter};
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::process::{exit, Command, ExitStatus};
+use std::thread::spawn;
+use std::cell::{Cell, RefCell};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use std::ffi::{OsStr, OsString};
 use std::rc::Rc;
-use std::cell::RefCell;
 use std::io::{self, Write};
-use std::os::unix::io::AsRawFd;
-use std::process::Command;
-use tokio_core::reactor::{Core, Handle, PollEvented};
-use tokio_file_unix::File as TokioFile;
-use tokio_io::codec::{FramedRead, FramedWrite};
+use std::os::unix::ffi::OsStrExt;
+use tokio_core::reactor::{Core, Handle};
+use tokio_unzip::StreamUnzipExt;
 use tokio_process::CommandExt;
-use input::{InputEvent, EventRef, EventMut, EventKind, EvdevHandle, UInputHandle, Bitmask, Key};
-use futures::{future, Future, Stream, Sink};
-use futures::stream::{self, iter_ok};
+use tokio_timer::Timer;
+use clap::{Arg, App, SubCommand, AppSettings};
 use futures::sync::mpsc;
 use futures::unsync::mpsc as un_mpsc;
+use futures::{Future, Stream, Sink, IntoFuture, stream, future};
 use futures_cpupool::CpuPool;
+use failure::Error;
+use input::InputId;
+use config::{
+    Config, ConfigEvent, ConfigGrab, ConfigGrabMode,
+    ConfigDdc, ConfigDdcHost, ConfigDdcGuest,
+    ConfigQemuDriver, ConfigQemuComm,
+};
+use event::{Hotkey, UserEvent, ProcessedXEvent};
+use ddc::{SearchDisplay, SearchInput, Monitor};
+use x::XRequest;
 
 fn main() {
     match main_result() {
-        Ok(res) => exit(res),
-        Err(err) => {
-            panic!("boom {:?}", err)
+        Ok(code) => exit(code),
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "{:?} {}", e, e);
+            exit(1);
         },
     }
-}
-
-fn handle_visible_event(visible: bool) -> io::Result<()> {
-    use std::process::Command;
-
-    let res = Command::new("vm")
-        .arg("windows")
-        .arg(if visible { "video_input_guest" } else { "video_input_host" })
-        .spawn().map(drop);
-
-    if let Err(ref err) = res {
-        println!("Failed to spawn event handler: {:?}", err);
-    }
-
-    res
-}
-
-#[derive(Debug)]
-enum XEvent {
-    Visible(bool),
-    Leave,
-    Resize {
-        width: u16,
-        height: u16,
-    },
-    Mouse {
-        x: i16,
-        y: i16,
-    },
-    Button {
-        pressed: bool,
-        detail: xcb::Button,
-        state: u16,
-    },
-    Key {
-        pressed: bool,
-        keycode: xcb::Keycode,
-        keysym: Option<xcb::Keysym>,
-        state: u16,
-    },
-}
-
-#[derive(Debug)]
-enum TerminalEvent {
-    Error(Error),
-    Exit(i32),
-}
-
-#[derive(Debug)]
-enum UserEvent {
-    ShowHost,
-    ShowGuest,
-    Exec(Vec<String>),
-    ToggleGrab,
-    Grab,
-    Ungrab,
-}
-
-fn send_event<T, I: Into<T>>(handle: &mut mpsc::Sender<T>, event: I) -> Result<(), Error> {
-    match handle.try_send(event.into()) {
-        Ok(_) => Ok(()),
-        Err(ref err) if err.is_full() => {
-            unimplemented!()
-        },
-        Err(ref err) if err.is_disconnected() => Err(Error::Exit),
-        _ => unreachable!(),
-    }
-}
-
-#[derive(Debug)]
-struct Hotkey {
-    triggers: Vec<Key>,
-    modifiers: Vec<Key>,
-    event: Rc<UserEvent>,
-}
-
-enum XEventProcessed {
-    User(UserEvent),
-    Input(InputEvent),
-}
-
-impl From<UserEvent> for XEventProcessed {
-    fn from(e: UserEvent) -> Self {
-        XEventProcessed::User(e)
-    }
-}
-
-impl From<InputEvent> for XEventProcessed {
-    fn from(e: InputEvent) -> Self {
-        XEventProcessed::Input(e)
-    }
-}
-
-#[derive(Default)]
-struct XEventHandler {
-    width: u16,
-    height: u16,
-    prev_x: i16,
-    prev_y: i16,
-    evdev: Vec<EvdevHandle>,
-    grabbing: bool,
-    keys: Bitmask<Key>,
-    triggers_press: HashMap<Key, Vec<Rc<Hotkey>>>,
-    triggers_release: HashMap<Key, Vec<Rc<Hotkey>>>,
-    remap: HashMap<Key, Key>,
-    ddc_input: Arc<ddc::SearchInput>,
-    ddc_monitor: Arc<Mutex<ddc::Monitor>>,
-}
-
-impl XEventHandler {
-    pub fn add_hotkey(&mut self, hotkey: Hotkey, press: bool) {
-        let hotkey = Rc::new(hotkey);
-        for trigger in &hotkey.triggers {
-            if press {
-                &mut self.triggers_press
-            } else {
-                &mut self.triggers_release
-            }.entry(*trigger).or_insert(Vec::new()).push(hotkey.clone());
-        }
-    }
-
-    fn event_time(&self) -> input::EventTime {
-        unsafe { ::std::mem::zeroed() }
-    }
-
-    fn key_state(pressed: bool) -> i32 {
-        match pressed {
-            true => input::KeyState::Pressed.into(),
-            false => input::KeyState::Released.into(),
-        }
-    }
-
-    fn map_button(&self, button: xcb::Button) -> Option<Key> {
-        match button as _ {
-            /*xcb::BUTTON_INDEX_1 => Some(Key::ButtonLeft),
-            xcb::BUTTON_INDEX_2 => Some(Key::ButtonMiddle),
-            xcb::BUTTON_INDEX_3 => Some(Key::ButtonRight),
-            xcb::BUTTON_INDEX_4 => Some(Key::Button?),
-            xcb::BUTTON_INDEX_5 => Some(Key::Button?),*/
-            xcb::BUTTON_INDEX_1 => Some(Key::ButtonLeft),
-            xcb::BUTTON_INDEX_2 => Some(Key::ButtonRight),
-            xcb::BUTTON_INDEX_3 => Some(Key::ButtonMiddle),
-            xcb::BUTTON_INDEX_4 => Some(Key::ButtonWheel), // Key::ButtonGearDown
-            xcb::BUTTON_INDEX_5 => Some(Key::ButtonGearUp),
-            // 9 and 8 should be key::ButtonSide, Key::ButtonExtra? would be better to use fwd/back but qemu doesn't really support it looks like
-            unk => None,
-        }
-    }
-
-    fn map_keycode(&self, key: xcb::Keycode) -> Option<Key> {
-        match Key::from_code(key as _) {
-            Ok(code) => Some(code),
-            Err(..) => {
-                println!("unknown keycode {}", key);
-                None
-            },
-        }
-    }
-
-    fn map_keysym(&self, key: xcb::Keysym) -> Option<Key> {
-        unimplemented!()
-    }
-
-    fn sync(&self, events: &mut Vec<XEventProcessed>) {
-        if !events.is_empty() {
-            events.push(XEventProcessed::Input(
-                input::SynchronizeEvent::new(
-                    self.event_time(),
-                    input::SynchronizeKind::Report,
-                    0
-                ).into()
-            ));
-        }
-    }
-
-    fn trigger_leave(&mut self, leave_sender: un_mpsc::Sender<InputEvent>) -> Box<Future<Item=(), Error=Error>> {
-        let events: Vec<_> = self.leave_events().collect();
-        self.keys = Default::default();
-        Box::new(
-            stream::iter_ok(events).fold(leave_sender, |sender, item|
-                sender.send(item).map_err(Error::from)
-            ).map(drop)
-        ) as Box<_>
-    }
-
-    fn ddc_host(&self, handle: &Handle) -> Box<Future<Item=(), Error=Error>> {
-        // TODO: ugh
-        let child = Command::new("vm").args(&["windows", "video_input_host"]).spawn_async(handle);
-        Box::new(future::result(child).and_then(|c| c).map_err(Error::from).and_then(Error::from_exit_status)) as Box<_>
-    }
-
-    fn ddc_guest(&self, ddc_remote: &CpuPool) -> Box<Future<Item=(), Error=Error>> {
-        let monitor = self.ddc_monitor.clone();
-        let input = self.ddc_input.clone();
-        Box::new(futures::sync::oneshot::spawn_fn(move || {
-            let mut monitor = monitor.lock()?;
-            monitor.to_display()?;
-            if let Some(input) = monitor.match_input(&input) {
-                monitor.set_input(input)
-            } else {
-                Err(Error::DdcNotFound)
-            }
-        }, ddc_remote)) as Box<_>
-    }
-
-    fn handle_user_event(&mut self, event: &UserEvent, leave_sender: un_mpsc::Sender<InputEvent>, handle: &Handle, ddc_remote: &CpuPool) -> Result<Box<Future<Item=(), Error=Error>>, Error> {
-        println!("user event {:?}", event);
-
-        Ok(match *event {
-            UserEvent::ShowHost => {
-                Box::new(stream::futures_unordered(vec![
-                    self.ddc_host(handle),
-                    self.trigger_leave(leave_sender),
-                ]).for_each(|_| Ok(()))) as Box<_>
-            },
-            UserEvent::ShowGuest => {
-                self.ddc_guest(ddc_remote)
-            },
-            UserEvent::Exec(ref args) => {
-                let (cmd, args) = args.split_at(1);
-
-                let child = Command::new(&cmd[0]).args(args).spawn_async(handle);
-                Box::new(future::result(child).and_then(|c| c).map_err(Error::from).and_then(Error::from_exit_status)) as Box<_>
-            },
-            UserEvent::ToggleGrab => {
-                let ev = if self.grabbing {
-                    UserEvent::Ungrab
-                } else {
-                    UserEvent::Grab
-                };
-                return self.handle_user_event(&ev, leave_sender, handle, ddc_remote)
-            },
-            UserEvent::Grab => {
-                for evdev in &self.evdev {
-                    evdev.grab(true)?;
-                }
-                self.grabbing = true;
-                self.trigger_leave(leave_sender)
-            },
-            UserEvent::Ungrab => {
-                for evdev in &self.evdev {
-                    evdev.grab(false)?;
-                }
-                self.grabbing = false;
-                self.trigger_leave(leave_sender)
-            },
-        })
-    }
-
-    fn handle_pre_input_event(&mut self, mut e: InputEvent) -> InputEvent {
-        match EventMut::new(&mut e) {
-            Ok(EventMut::Key(key)) => {
-                if let Some(remap) = self.remap.get(&key.key) {
-                    key.key = *remap;
-                }
-            },
-            _ => (),
-        }
-
-        e
-    }
-
-    fn handle_input_event(&mut self, e: EventRef) -> stream::IterOk<vec::IntoIter<Rc<UserEvent>>, Error> {
-        //println!("event {:?}", e);
-
-        iter_ok(match e {
-            EventRef::Key(key) => match key.key_state() {
-                input::KeyState::Released => {
-                    let mut events = Vec::new();
-                    if let Some(hotkeys) = self.triggers_release.get(&key.key) {
-                        for hotkey in hotkeys {
-                            if hotkey.triggers.iter().chain(hotkey.modifiers.iter()).all(|k| self.keys.get(*k)) {
-                                events.push(hotkey.event.clone());
-                            }
-                        }
-                    }
-
-                    self.keys.clear(key.key);
-
-                    events
-                },
-                input::KeyState::Pressed => {
-                    self.keys.set(key.key);
-
-                    let mut events = Vec::new();
-                    if let Some(hotkeys) = self.triggers_press.get(&key.key) {
-                        for hotkey in hotkeys {
-                            if hotkey.triggers.iter().chain(hotkey.modifiers.iter()).all(|k| self.keys.get(*k)) {
-                                events.push(hotkey.event.clone());
-                            }
-                        }
-                    }
-
-                    if !events.is_empty() {
-                        // TODO: trigger leave event to remove all holds (make this a user event?)
-                    }
-
-                    events
-                },
-                _ => Default::default(),
-            },
-            _ => Default::default(),
-        })
-    }
-
-    fn filter_evdev(&self, e: &InputEvent) -> bool {
-        return self.grabbing;
-    }
-
-    fn filter_xevent(&self, e: &InputEvent) -> bool {
-        return !self.grabbing;
-    }
-
-    fn key_event(&mut self, key: Key, pressed: bool) -> Vec<XEventProcessed> {
-        vec![
-            XEventProcessed::Input(
-                input::KeyEvent::new(
-                    self.event_time(),
-                    key,
-                    Self::key_state(pressed)
-                ).into()
-            ),
-            XEventProcessed::Input(
-                input::SynchronizeEvent::new(
-                    self.event_time(),
-                    input::SynchronizeKind::Report,
-                    0
-                ).into()
-            ),
-        ]
-    }
-
-    // -> impl Iterator would be amazing right about now
-    fn leave_events(&mut self) -> iter::Chain<iter::Map<input::bitmask::BitmaskIterator<Key>, fn(Key) -> InputEvent>, iter::Once<InputEvent>> {
-        fn key_event(key: Key) -> InputEvent {
-            input::KeyEvent::new(Default::default(), key, XEventHandler::key_state(false)).into()
-        }
-
-        self.keys.iter().map(key_event as _)
-            .chain(iter::once(input::SynchronizeEvent::new(
-                self.event_time(),
-                input::SynchronizeKind::Report,
-                0
-            ).into()))
-    }
-
-    // TODO: replace with a smallvec
-    fn handle_xevent(&mut self, e: XEvent) -> stream::IterOk<vec::IntoIter<XEventProcessed>, Error> {
-        iter_ok(match e {
-            XEvent::Visible(visible) => {
-                vec![
-                    XEventProcessed::User(
-                        if visible { UserEvent::ShowGuest } else { UserEvent::ShowHost }
-                    ),
-                ]
-            },
-            XEvent::Leave => {
-                let events = self.leave_events().map(XEventProcessed::Input).collect();
-                self.keys = Default::default();
-                events
-            },
-            XEvent::Mouse { x, y } => {
-                let mut events = Vec::new();
-                if x != self.prev_x && self.width > 0 {
-                    self.prev_x = x;
-                    events.push(XEventProcessed::Input(
-                        input::AbsoluteEvent::new(
-                            self.event_time(),
-                            input::AbsoluteAxis::X,
-                            (x as isize * 0x2000 / self.width as isize) as i32
-                        ).into()
-                    ));
-                }
-                if y != self.prev_y  && self.height > 0 {
-                    self.prev_y = y;
-                    events.push(XEventProcessed::Input(
-                        input::AbsoluteEvent::new(
-                            self.event_time(),
-                            input::AbsoluteAxis::Y,
-                            (y as isize * 0x2000 / self.height as isize) as i32
-                        ).into()
-                    ));
-                }
-                self.sync(&mut events);
-
-                events
-            },
-            XEvent::Resize { width, height } => {
-                self.width = width;
-                self.height = height;
-
-                Default::default()
-            },
-            XEvent::Button { pressed, detail, state } => {
-                if let Some(button) = self.map_button(detail) {
-                    self.key_event(button, pressed)
-                } else {
-                    println!("unknown button {}", detail);
-                    Default::default()
-                }
-            },
-            XEvent::Key { pressed, keycode, keysym, state } => {
-                if let Some(key) = self.map_keycode(keycode) {
-                    self.key_event(key, pressed)
-                } else {
-                    println!("unknown keycode {} keysym {:?}", keycode, keysym);
-                    Default::default()
-                }
-            },
-        })
-    }
-}
-
-fn evdev_read(filename: &str, handle: &Handle) -> Result<(EvdevHandle, FramedRead<PollEvented<Fd<io::BufReader<fs::File>>>, input::EventCodec>), Error> {
-    /*let f = fs::File::open(FILENAME)?;
-    let f = TokioFile::new_nb(f)?;
-    let f = PollEvented::new(f, &handle).unwrap();*/
-    let f = fd::open_options();
-    let f = f.open(filename)?;
-    let evdev = EvdevHandle::new(&f);
-    let f = PollEvented::new(Fd::from_fd(f.as_raw_fd(), io::BufReader::with_capacity(24*0x10, f)), &handle)?;
-    let read = FramedRead::new(f, input::EventCodec::new());
-
-    Ok((evdev, read))
-    /*handle.spawn(read.for_each(|e| {
-        Ok(println!("event {:?}", InputEvent::from_raw(&e)))
-    }).map_err(drop));*/
-}
-
-fn uinput_create() -> Result<(UInputHandle, fs::File), Error> {
-    const FILENAME: &'static str = "/dev/uinput";
-    let mut f = fd::open_options();
-    f.write(true);
-    let f = f.open(FILENAME)?;
-    let uinput = UInputHandle::new(&f);
-
-    Ok((uinput, f))
 }
 
 fn main_result() -> Result<i32, Error> {
-    let (uinput, _uinput) = uinput_create()?;
-    let uinput = Arc::new(uinput);
+    env_logger::init();
 
-    let xevents = Rc::new(RefCell::new(XEventHandler::default()));
-    xevents.borrow_mut().ddc_input = Arc::new(ddc::SearchInput {
-        name: Some("DisplayPort-1".into()),
-        .. Default::default()
-    });
-    xevents.borrow_mut().ddc_monitor = Arc::new(Mutex::new(ddc::Monitor::new(
-        ddc::Search {
-            manufacturer_id: Some("GSM".into()),
-            model_name: Some("LG Ultra HD".into()),
-            .. Default::default()
-        }
-    )));
+    let app = App::new("screenstub")
+        .version(env!("CARGO_PKG_VERSION"))
+        .author("arcnmx")
+        .about("A software KVM")
+        .arg(Arg::with_name("config")
+            .short("c")
+            .long("config")
+            .value_name("CONFIG")
+            .takes_value(true)
+            .help("Configuration TOML file")
+        ).subcommand(SubCommand::with_name("x")
+            .about("Start the KVM with a fullscreen X window")
+        ).setting(AppSettings::SubcommandRequiredElseHelp);
 
-    xevents.borrow_mut().add_hotkey(Hotkey {
-        triggers: vec![Key::KeyG],
-        modifiers: vec![Key::KeyLeftMeta],
-        event: Rc::new(UserEvent::ToggleGrab),
-    }, false);
+    let matches = app.get_matches();
+    let config = if let Some(config) = matches.value_of("config") {
+        use std::fs::File;
 
-    let mut core = Core::new().unwrap();
-    let handle = core.handle();
-    let remote = core.remote();
-
-    let mut bits_events = Bitmask::<EventKind>::default();
-    let mut bits_keys = Bitmask::<Key>::default();
-    let mut bits_abs = Bitmask::<input::AbsoluteAxis>::default();
-    let mut props = Bitmask::<input::InputProperty>::default();
-    let mut bits_rel = Bitmask::<input::RelativeAxis>::default();
-    let mut bits_misc = Bitmask::<input::MiscKind>::default();
-    let mut bits_led = Bitmask::<input::LedKind>::default();
-    let mut bits_sound = Bitmask::<input::SoundKind>::default();
-    let mut bits_switch = Bitmask::<input::SwitchKind>::default();
-
-    // X window events
-    bits_events.set(EventKind::Key);
-    bits_events.set(EventKind::Autorepeat); // kernel should handle this for us I think?
-    bits_events.set(EventKind::Absolute);
-    //bits_keys.or(Key::iter());
-    bits_abs.set(input::AbsoluteAxis::X);
-    bits_abs.set(input::AbsoluteAxis::Y);
-
-    let uinput_id = input::InputId {
-        bustype: input::sys::BUS_VIRTUAL,
-        vendor: 0x16c0,
-        product: 0x05df,
-        version: 1,
+        let mut f = File::open(config)?;
+        serde_yaml::from_reader(f)?
+    } else {
+        Config::default()
     };
 
-    /*let uinput_abs = vec![
-        input::AbsoluteInfoSetup {
-            axis: input::AbsoluteAxis::X,
-            info: input::AbsoluteInfo {
-                value: 0,
-                minimum: 0,
-                maximum: 0x2000,
-                fuzz: 0,
-                flat: 0,
-                resolution: 1,
-            },
-        },
-        input::AbsoluteInfoSetup {
-            axis: input::AbsoluteAxis::Y,
-            info: input::AbsoluteInfo {
-                value: 0,
-                minimum: 0,
-                maximum: 0x2000,
-                fuzz: 0,
-                flat: 0,
-                resolution: 1,
-            },
-        },
-    ];*/
-    let mut uinput_abs = Vec::new();
+    match matches.subcommand() {
+        ("x", Some(..)) => {
+            let config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
 
-    let (mut send_event, recv_event) = un_mpsc::channel::<InputEvent>(0x10);
-    let (mut send_user, recv_user) = un_mpsc::channel::<Rc<UserEvent>>(0x10);
-    let (mut send_term, recv_term) = mpsc::channel::<TerminalEvent>(0x10);
-
-    let mut evdev_handlers = Vec::new();
-
-    let evdevs = ["/dev/input/by-id/usb-Razer_Razer_Naga_2014-if02-event-kbd", "/dev/input/by-id/usb-Razer_Razer_Naga_2014-event-mouse"];
-    for filename in &evdevs {
-        let (evdev, read) = evdev_read(filename, &handle)?;
-
-        let id = evdev.device_id()?;
-        let name = String::from_utf8(evdev.device_name()?);
-        println!("opened evdev {} = {:?}", name.unwrap_or("(null)".into()), id);
-
-        for prop in &evdev.device_properties()? {
-            props.set(prop);
-        }
-
-        for event in &evdev.event_bits()? {
-            bits_events.set(event);
-        }
-
-        for bit in &evdev.key_bits()? {
-            bits_keys.set(bit);
-        }
-
-        for bit in &evdev.relative_bits()? {
-            bits_rel.set(bit);
-        }
-
-        /* TODO: fix this shit
-        for bit in &evdev.absolute_bits()? {
-            bits_abs.set(bit);
-            uinput_abs.push(input::AbsoluteInfoSetup {
-                axis: bit,
-                info: evdev.absolute_info(bit)?
-            });
-        }*/
-
-        for bit in &evdev.misc_bits()? {
-            bits_misc.set(bit);
-        }
-
-        for bit in &evdev.led_bits()? {
-            bits_led.set(bit);
-        }
-
-        for bit in &evdev.sound_bits()? {
-            bits_sound.set(bit);
-        }
-
-        for bit in &evdev.switch_bits()? {
-            bits_switch.set(bit);
-        }
-
-        xevents.borrow_mut().evdev.push(evdev);
-
-        // ff bits?
-
-        let send_event = send_event.clone();
-        let send_term = send_term.clone();
-        let uinput = uinput.clone();
-        let xevents = xevents.clone();
-        evdev_handlers.push(
-            read.map_err(Error::from)
-            .filter(move |e| xevents.borrow_mut().filter_evdev(e))
-            .forward(send_event).map(drop).map_err(Error::from)
-            .map_err(TerminalEvent::Error).or_else(|e| send_term.send(e).map(drop)).map_err(drop)
-        );
-    }
-    uinput_abs.push(
-        input::AbsoluteInfoSetup {
-            axis: input::AbsoluteAxis::X,
-            info: input::AbsoluteInfo {
-                value: 0,
-                minimum: 0,
-                maximum: 0x2000,
-                fuzz: 0,
-                flat: 0,
-                resolution: 1,
-            },
-        });
-    uinput_abs.push(
-        input::AbsoluteInfoSetup {
-            axis: input::AbsoluteAxis::Y,
-            info: input::AbsoluteInfo {
-                value: 0,
-                minimum: 0,
-                maximum: 0x2000,
-                fuzz: 0,
-                flat: 0,
-                resolution: 1,
-            },
-        });
-
-    println!("props {:?}", props);
-    for bit in &props {
-        uinput.set_propbit(bit)?;
-    }
-
-    println!("events {:?}", bits_events);
-    for bit in &bits_events {
-        uinput.set_evbit(bit)?;
-    }
-
-    println!("keys {:?}", bits_keys);
-    for bit in &bits_keys {
-        uinput.set_keybit(bit)?;
-    }
-
-    for bit in &bits_rel {
-        uinput.set_relbit(bit)?;
-    }
-
-    for bit in &bits_abs {
-        uinput.set_absbit(bit)?;
-    }
-
-    for bit in &bits_misc {
-        uinput.set_mscbit(bit)?;
-    }
-
-    for bit in &bits_led {
-        uinput.set_ledbit(bit)?;
-    }
-
-    for bit in &bits_sound {
-        uinput.set_sndbit(bit)?;
-    }
-
-    for bit in &bits_switch {
-        uinput.set_swbit(bit)?;
-    }
-
-    //evdev.grab(true)?;
-
-    uinput.create(&uinput_id, b"screenstub", 0, &uinput_abs)?;
-    println!("uinput: {}", uinput.evdev_path()?.display());
-
-    let (mut send_x, recv_x) = mpsc::channel::<XEvent>(0x10);
-
-    {
-        let send_term = send_term.clone();
-        let _join = spawn(move || {
-            use std::panic::{catch_unwind, AssertUnwindSafe};
-
-            let res = {
-                let send_term = send_term.clone();
-                catch_unwind(AssertUnwindSafe(|| match xmain(&mut send_x) {
-                    Ok(res) => remote.spawn(move |h| send_term.send(TerminalEvent::Exit(res)).map(drop).map_err(drop)),
-                    Err(err) => remote.spawn(move |h| send_term.send(TerminalEvent::Error(err)).map(drop).map_err(drop)),
-                }))
-            };
-
-            if let Err(err) = res {
-                let err = if let Some(err) = err.downcast_ref::<&str>() {
-                    (*err).into()
-                } else if let Some(err) = err.downcast_ref::<String>() {
-                    err
+            let (mut xsender, xreceiver) = mpsc::channel(0x20); // TODO: up this after testing that backpressure works
+            let (xreqsender, xreqreceiver) = mpsc::channel(0x08);
+            let xthread = spawn(move || {
+                if let Err(res) = x::XContext::xmain(xreqreceiver, &mut xsender) {
+                    x::XContext::spin_send(&mut xsender, Err(res))
                 } else {
-                    "X thread panic"
-                };
-
-                let err = io::Error::new(io::ErrorKind::Other, err).into();
-                remote.spawn(move |h| send_term.send(TerminalEvent::Error(err)).map(drop).map_err(drop))
-            }
-        });
-    }
-
-    {
-        let mut xevents = xevents.clone();
-        let mut xevents2 = xevents.clone();
-        let send_user = send_user.clone();
-        let send_term = send_term.clone();
-        let send_term2 = send_term.clone();
-        let send_event = send_event.clone();
-        handle.spawn(recv_x.map_err(|_| -> Error { unreachable!() })
-            .map(move |e| xevents.borrow_mut().handle_xevent(e)).flatten()
-            /*.and_then(move |e| match e {
-                XEventProcessed::User(e) => future::Either::A(send_user.clone().send(Rc::new(e)).map_err(Error::from).map(drop)),
-                XEventProcessed::Input(e) => future::Either::B(send_event.clone().send(e).map_err(Error::from).map(drop)),
-            }).for_each(|_| Ok(()))*/
-            .map(move |e| match e {
-                XEventProcessed::User(e) => (Some(Rc::new(e)), None),
-                XEventProcessed::Input(e) => (None, Some(e)),
-            }).unzip_spawn(&handle, |s|
-                s.filter_map(|e| e)
-                .filter(move |e| xevents2.borrow_mut().filter_xevent(e))
-                .map_err(|_| -> Error { unreachable!() }).forward(send_event).map_err(Error::from).map(drop)
-                .map_err(TerminalEvent::Error).or_else(|e| send_term2.send(e).map(drop)).map_err(drop)
-            ).filter_map(|e| e).forward(send_user).map(drop)
-            //.forward(send_event).map(drop).map_err(Error::from)
-            .map_err(TerminalEvent::Error).or_else(|e| send_term.send(e).map(drop)).map_err(drop)
-        );
-    }
-
-    for handler in evdev_handlers {
-        handle.spawn(handler);
-    }
-
-    let uinput_f = PollEvented::new(Fd::new(_uinput), &handle)?;
-    let uinput_write = FramedWrite::new(uinput_f, input::EventCodec::new());
-    {
-        let xevents = xevents.clone();
-        let xevents2 = xevents.clone();
-        let send_term = send_term.clone();
-        handle.spawn(recv_event.map_err(|_| -> Error { unreachable!() })
-            .map(move |e| {
-                xevents2.borrow_mut().handle_pre_input_event(e)
-            })
-            .and_then(move |e| {
-                use std::slice;
-                let slice = unsafe { slice::from_raw_parts(e.as_raw() as *const _, 1) };
-                uinput.write(slice).map(|_| e).map_err(From::from)
-            })
-            .map(move |e| {
-                if let Ok(e) = EventRef::new(&e) {
-                    xevents.borrow_mut().handle_input_event(e)
-                } else {
-                    panic!("bad event {:?}", e)
+                    Ok(())
                 }
-            }).flatten()
-            .forward(send_user).map(drop).map_err(Error::from)
-            //}).forward(uinput_write).map(drop).map_err(Error::from)
-            .map_err(TerminalEvent::Error).or_else(|e| send_term.send(e).map(drop)).map_err(drop)
-        );
+            });
+
+            let mut ddc_pool = futures_cpupool::Builder::new()
+                .pool_size(1)
+                .name_prefix("DDC")
+                .create();
+
+            let mut uinput = uinput::Builder::new();
+            uinput.name("screenstub");
+            uinput.id(&InputId {
+                bustype: input::sys::BUS_VIRTUAL,
+                vendor: 0x16c0,
+                product: 0x05df,
+                version: 1,
+            });
+            uinput.x_config();
+            let uinput = uinput.create()?;
+            let uinput_path = uinput.path().to_owned();
+            info!("uinput path: {}", uinput_path.display());
+
+            let mut core = Core::new()?;
+            let core_handle = core.handle();
+
+            let timer = Timer::default();
+
+            let mut qemu = Rc::new(RefCell::new(Qemu::new(config.qemu, core_handle.clone())));
+
+            let mut user = UserProcess::new(core_handle.clone(),
+                ddc_pool,
+                convert_display(config.monitor),
+                convert_input(config.host_source),
+                convert_input(config.guest_source),
+                config.ddc,
+                qemu.clone(),
+            );
+            let user = Rc::new(RefCell::new(user));
+
+            let mut events = event::Events::new();
+            config.hotkeys.into_iter()
+                .map(convert_hotkey)
+                .for_each(|(hotkey, on_press)| events.add_hotkey(hotkey, on_press));
+            config.key_remap.into_iter().for_each(|(from, to)| events.add_remap(from, to));
+
+            let events = Rc::new(RefCell::new(events));
+
+            let evdev_sleep = timer.sleep(Duration::from_secs(2)).map_err(Error::from);
+            core_handle.spawn(qemu.borrow_mut().remove_evdev("screenstub-abs")
+                .then(|_| evdev_sleep)
+                .and_then({
+                    let qemu = qemu.clone();
+                    move |_| {
+                        let mut qemu = qemu.borrow_mut(); // wtf rust?
+                        qemu.add_evdev("screenstub-abs", uinput_path)
+                    }
+                }).map_err(|e| error!("Failed to add uinput device to qemu {} {:?}", e, e))
+                .or_else(|_| Ok::<_, ()>(()))
+            );
+
+            let (inputsender, inputreceiver) = un_mpsc::channel(0x10);
+            let uinput = uinput.to_sink(&core_handle)?;
+            core_handle.spawn(inputreceiver
+                .map({
+                    let events = events.clone();
+                    move |e| events.borrow_mut().map_input_event(e)
+                })
+                .map_err(|_| -> Error { unreachable!() })
+                .forward(uinput).map(drop).map_err(drop) // TODO: error handling
+            );
+
+            let (usersender, userreceiver) = un_mpsc::channel::<Rc<ConfigEvent>>(0x08);
+            core_handle.spawn(userreceiver
+                .map_err(|_| -> Error { unreachable!() })
+                .map({
+                    let user = user.clone();
+                    move |userevent| stream::iter_ok::<_, Error>(user.borrow_mut().process_user_event(&userevent))
+                })
+                .flatten()
+                .map(|e| match e {
+                    ProcessedUserEvent::UserEvent(e) => (Some(
+                        e.or_else(|e| {
+                            warn!("UserEvent failed {} {:?}", e, e);
+                            Ok(())
+                        })
+                    ), None),
+                    ProcessedUserEvent::XRequest(e) => (None, Some(e)),
+                }).unzip_spawn(&core_handle, |s| s.filter_map(|e| e)
+                    .map_err(|_| -> mpsc::SendError<_> { unreachable!() }) // ugh come on
+                    .forward(xreqsender).map(drop).map_err(drop)
+                ).map_err(|e| format_err!("{:?}", e))? // ugh can this even fail?
+                .filter_map(|e| e)
+                .buffer_unordered(8)
+                .map_err(drop)
+                .for_each(|_| Ok(()))
+            );
+
+            let (input_organic_sender, input_organic_receiver) = un_mpsc::channel(0x10);
+            core_handle.spawn(input_organic_receiver
+                .map_err(|_| -> Error { unreachable!() })
+                .map({
+                    let events = events.clone();
+                    move |inputevent| stream::iter_ok::<_, Error>(events.borrow_mut().process_input_event(&inputevent))
+                }).flatten()
+                .map_err(|_| -> un_mpsc::SendError<_> { unreachable!() })
+                .forward(usersender.clone()).map(drop).map_err(drop)
+            );
+
+            core.run(xreceiver
+                .map_err(|_| -> Error { unreachable!() })
+                .and_then(|e| e)
+                .map({
+                    let events = events.clone();
+                    move |xevent| stream::iter_ok::<_, Error>(events.borrow_mut().process_x_event(&xevent))
+                }).flatten()
+                .map(|e| match e {
+                    ProcessedXEvent::InputEvent(e) => (Some(e), None),
+                    ProcessedXEvent::UserEvent(e) => (None, Some(e)),
+                }).unzip_spawn(&core_handle, |s| s.filter_map(|e| e)
+                    .map(convert_user_event)
+                    .map_err(|_| -> un_mpsc::SendError<_> { unreachable!() }) // ugh come on
+                    .forward(usersender).map(drop).map_err(drop)
+                ).map_err(|e| format_err!("{:?}", e))? // ugh can this even fail?
+                .filter_map(|e| e)
+                .forward(inputsender.fanout(input_organic_sender)).map(drop).map_err(drop)
+            ).unwrap();
+
+            if let Err(e) = core.run(qemu.borrow_mut().remove_evdev("screenstub-abs")) {
+                error!("Failed to remove uinput device from qemu {} {:?}", e, e);
+            }
+
+            if let Err(e) = core.run(
+                stream::iter_result(
+                    config.exit_events.into_iter()
+                    .map(|e| user.borrow_mut().process_user_event(&e))
+                    .flat_map(|e| e)
+                    .map(|e| match e {
+                        ProcessedUserEvent::UserEvent(e) => Ok(e),
+                        ProcessedUserEvent::XRequest(x) => Err(format_err!("event {:?} cannot be processed at exit", x)),
+                    })
+                ).for_each(|_| Ok(()))
+            ) {
+                error!("Failed to run exit events: {} {:?}", e, e);
+            }
+
+            // TODO: go back to host at this point before exiting
+
+            xthread.join().unwrap()?; // TODO: get this properly
+
+            Ok(0)
+        },
+        _ => unreachable!("unknown command"),
     }
-
-    let pool = {
-        use futures_cpupool::Builder;
-        let mut builder = Builder::new();
-        builder.pool_size(1);
-        builder.name_prefix("ddc");
-        builder.create()
-    };
-
-    {
-        let xevents = xevents.clone();
-        let pool = pool.clone();
-        let handle2 = handle.clone();
-        handle.spawn(recv_user.map_err(|_| -> Error { unreachable!() })
-            .map(move |e| xevents.borrow_mut().handle_user_event(&e, send_event.clone(), &handle2, &pool))
-            .and_then(|e| e)
-            .buffer_unordered(8)
-            .or_else(|e| {
-                println!("WARNING: user event error: {:?}", e);
-                Ok(())
-            }).for_each(|_| Ok(()))
-        );
-    }
-
-    core.run(recv_term.map_err(|_| unreachable!()).and_then(|e| {
-        match e {
-            TerminalEvent::Exit(res) => Ok(res),
-            TerminalEvent::Error(err) => Err(err),
-        }
-    }).into_future().map(|(e, _)| e.unwrap_or(0)).map_err(|(e, _)| e))
 }
 
-fn xmain(handle: &mut mpsc::Sender<XEvent>) -> Result<i32, Error> {
-    let (conn, screen_num) = xcb::Connection::connect(None)?;
-    let setup = conn.get_setup();
-    let screen = setup.roots().nth(screen_num as usize).unwrap();
+fn convert_user_event(event: UserEvent) -> Rc<ConfigEvent> {
+    Rc::new(match event {
+        UserEvent::ShowGuest => ConfigEvent::ShowGuest,
+        UserEvent::ShowHost => ConfigEvent::ShowHost,
+        UserEvent::UnstickGuest => ConfigEvent::UnstickGuest,
+        UserEvent::UnstickHost => ConfigEvent::UnstickHost,
+    })
+}
 
-    let atom_wm_state = xcb::intern_atom(&conn, true, "WM_STATE").get_reply()?.atom();
-    let atom_wm_protocols = xcb::intern_atom(&conn, true, "WM_PROTOCOLS").get_reply()?.atom();
-    let atom_wm_delete_window = xcb::intern_atom(&conn, true, "WM_DELETE_WINDOW").get_reply()?.atom();
-    let atom_net_wm_state = xcb::intern_atom(&conn, true, "_NET_WM_STATE").get_reply()?.atom();
-    let atom_net_wm_state_fullscreen = xcb::intern_atom(&conn, true, "_NET_WM_STATE_FULLSCREEN").get_reply()?.atom();
-    let atom_atom = xcb::intern_atom(&conn, true, "ATOM").get_reply()?.atom();
+fn convert_hotkey(hotkey: config::ConfigHotkey) -> (Hotkey<ConfigEvent>, bool) {
+    (
+        Hotkey::new(hotkey.triggers, hotkey.modifiers, hotkey.events),
+        !hotkey.on_release,
+    )
+}
 
-    let win = conn.generate_id();
-    xcb::create_window(&conn,
-        xcb::COPY_FROM_PARENT as u8,
-        win,
-        screen.root(),
-        0, 0,
-        150, 150,
-        0,
-        xcb::WINDOW_CLASS_INPUT_OUTPUT as u16,
-        screen.root_visual(),
-        &[
-            (xcb::CW_BACK_PIXEL, screen.black_pixel()),
-            (
-                xcb::CW_EVENT_MASK,
-                xcb::EVENT_MASK_VISIBILITY_CHANGE | xcb::EVENT_MASK_PROPERTY_CHANGE |
-                xcb::EVENT_MASK_KEY_PRESS | xcb::EVENT_MASK_KEY_RELEASE |
-                xcb::EVENT_MASK_BUTTON_PRESS | xcb::EVENT_MASK_BUTTON_RELEASE |
-                xcb::EVENT_MASK_POINTER_MOTION | xcb::EVENT_MASK_BUTTON_MOTION |
-                xcb::EVENT_MASK_STRUCTURE_NOTIFY | xcb::EVENT_MASK_FOCUS_CHANGE
-            ),
-        ]
-    );
+fn convert_display(monitor: config::ConfigMonitor) -> SearchDisplay {
+    SearchDisplay {
+        manufacturer_id: monitor.manufacturer,
+        model_name: monitor.model,
+        serial_number: monitor.serial,
+        path: None, // TODO: i2c bus selection
+    }
+}
 
-    xcb::change_property(&conn, xcb::PROP_MODE_APPEND as _, win, atom_net_wm_state, atom_atom, 32, &[atom_net_wm_state_fullscreen]).request_check()?;
+fn convert_input(input: config::ConfigInput) -> SearchInput {
+    SearchInput {
+        value: input.value,
+        name: input.name,
+    }
+}
 
-    xcb::map_window(&conn, win);
-    conn.flush();
+pub enum ProcessedUserEvent {
+    UserEvent(Box<Future<Item=(), Error=Error>>),
+    XRequest(XRequest),
+}
 
-    xcb::change_property(&conn, xcb::PROP_MODE_REPLACE as _, win, atom_wm_protocols, atom_atom, 32, &[atom_wm_delete_window]).request_check()?;
+fn xreq(r: XRequest) -> ProcessedUserEvent {
+    ProcessedUserEvent::XRequest(r)
+}
 
-    let mut keys = xcb::get_keyboard_mapping(&conn, setup.min_keycode(), setup.max_keycode() - setup.min_keycode()).get_reply()?;
-    let mut mods = xcb::get_modifier_mapping(&conn).get_reply()?;
+fn user<F: IntoFuture<Item=(), Error=Error> + 'static>(f: F) -> Vec<ProcessedUserEvent> {
+    vec![f.into()]
+}
 
-    loop {
-        let event = conn.wait_for_event();
-        match event {
-            None => break,
-            Some(event) => {
-                let r = event.response_type() & !0x80;
-                match r {
-                    xcb::PROPERTY_NOTIFY => {
-                        let event: &xcb::PropertyNotifyEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
+impl<F: IntoFuture<Item=(), Error=Error> + 'static> From<F> for ProcessedUserEvent {
+    fn from(f: F) -> Self {
+        ProcessedUserEvent::UserEvent(Box::new(f.into_future()) as Box<_>)
+    }
+}
 
-                        match event.atom() {
-                            atom if atom == atom_wm_state => {
-                                let r = xcb::get_property(&conn, false, event.window(), event.atom(), 0, 0, 1).get_reply()?;
-                                let x = r.value::<u32>();
-                                let window_state_withdrawn = 0;
-                                // 1 is back but unobscured also works so ??
-                                let window_state_iconic = 3;
-                                match x.get(0) {
-                                    Some(&state) if state == window_state_withdrawn || state == window_state_iconic => {
-                                        send_event(handle, XEvent::Visible(false))?;
-                                    },
-                                    _ => (),
-                                }
-                            },
-                            _ => (),
-                        }
-                    },
-                    xcb::VISIBILITY_NOTIFY => {
-                        let event: &xcb::VisibilityNotifyEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
+pub struct UserProcess {
+    grabs: HashMap<ConfigGrabMode, bool>,
+    handle: Handle,
+    ddc_pool: CpuPool,
+    showing_guest: Rc<Cell<bool>>,
+    input_guest: Arc<SearchInput>,
+    input_host: Arc<SearchInput>,
+    input_host_value: Arc<AtomicUsize>,
+    ddc_host: ConfigDdcHost,
+    ddc_guest: ConfigDdcGuest,
+    ddc: Arc<Mutex<Monitor>>,
+    qemu: Rc<RefCell<Qemu>>,
+}
 
-                        match event.state() as _ {
-                            xcb::VISIBILITY_FULLY_OBSCURED => {
-                                send_event(handle, XEvent::Visible(false))?;
-                            },
-                            xcb::VISIBILITY_UNOBSCURED => {
-                                send_event(handle, XEvent::Visible(true))?;
-                            },
-                            _ => (),
-                        }
-                    },
-                    xcb::CLIENT_MESSAGE => {
-                        let event: &xcb::ClientMessageEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
-                        match event.data().data32().get(0) {
-                            Some(&atom) if atom == atom_wm_delete_window => {
-                                send_event(handle, XEvent::Visible(false))?;
-                                break
-                            },
-                            _ => (),
-                        }
-                    },
-                    xcb::BUTTON_PRESS => {
-                        let event: &xcb::ButtonPressEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
-                        send_event(handle, XEvent::Button {
-                            pressed: true,
-                            detail: event.detail(),
-                            state: event.state(),
-                        })?;
-                    },
-                    xcb::BUTTON_RELEASE => {
-                        let event: &xcb::ButtonReleaseEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
-                        send_event(handle, XEvent::Button {
-                            pressed: false,
-                            detail: event.detail(),
-                            state: event.state(),
-                        })?;
-                    },
-                    xcb::MOTION_NOTIFY => {
-                        let event: &xcb::MotionNotifyEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
-                        send_event(handle, XEvent::Mouse {
-                            x: event.event_x(),
-                            y: event.event_y(),
-                        })?;
-                    },
-                    xcb::FOCUS_OUT => {
-                        let event: &xcb::FocusOutEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
-                        send_event(handle, XEvent::Leave)?;
-                    },
-                    xcb::MAPPING_NOTIFY => {
-                        let event: &xcb::MappingNotifyEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
-                        keys = xcb::get_keyboard_mapping(&conn, setup.min_keycode(), setup.max_keycode() - setup.min_keycode()).get_reply()?;
-                        mods = xcb::get_modifier_mapping(&conn).get_reply()?;
-                    },
-                    xcb::FOCUS_IN => (),
-                    xcb::KEY_PRESS => {
-                        let event: &xcb::KeyPressEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
-                        let keycode = event.detail() - setup.min_keycode();
-                        let mut keysym = keys.keysyms().get(keycode as usize * keys.keysyms_per_keycode() as usize).map(Clone::clone);
-
-                        send_event(handle, XEvent::Key {
-                            pressed: true,
-                            keycode: keycode,
-                            keysym: if keysym == Some(0) { None } else { keysym },
-                            state: event.state(),
-                        })?;
-                    },
-                    xcb::KEY_RELEASE => {
-                        let event: &xcb::KeyReleaseEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
-                        let keycode = event.detail() - setup.min_keycode();
-                        let keysym = keys.keysyms().get(keycode as usize * keys.keysyms_per_keycode() as usize).map(Clone::clone);
-                        send_event(handle, XEvent::Key {
-                            pressed: false,
-                            keycode: keycode,
-                            keysym: if keysym == Some(0) { None } else { keysym },
-                            state: event.state(),
-                        })?;
-                    },
-                    xcb::CONFIGURE_NOTIFY => {
-                        let event: &xcb::ConfigureNotifyEvent = unsafe {
-                            xcb::cast_event(&event)
-                        };
-                        send_event(handle, XEvent::Resize {
-                            width: event.width(),
-                            height: event.height(),
-                        })?;
-                    },
-                    _ => {
-                        println!("unknown event {:}", r);
-                    },
-                }
-            }
+impl UserProcess {
+    fn new(handle: Handle, ddc_pool: CpuPool, display: SearchDisplay, input_host: SearchInput, input_guest: SearchInput, ddc: ConfigDdc, qemu: Rc<RefCell<Qemu>>) -> Self {
+        UserProcess {
+            grabs: Default::default(),
+            handle: handle,
+            showing_guest: Rc::new(Cell::new(false)),
+            input_guest: Arc::new(input_guest),
+            input_host: Arc::new(input_host),
+            input_host_value: Arc::new(AtomicUsize::new(0x100)),
+            ddc_host: ddc.host,
+            ddc_guest: ddc.guest,
+            ddc: Arc::new(Mutex::new(Monitor::new(display))),
+            ddc_pool: ddc_pool,
+            qemu: qemu,
         }
     }
 
-    Ok(0)
+    fn grab(&mut self, grab: &ConfigGrab) -> Vec<ProcessedUserEvent> {
+        let mode = grab.mode();
+
+        let res = vec![match *grab {
+            ConfigGrab::XCore => xreq(XRequest::Grab),
+            ref grab => future::err(format_err!("grab unimplemented")).into(),
+        }];
+
+        *self.grabs.entry(mode).or_insert(true) = true;
+
+        res
+    }
+
+    fn ungrab(&mut self, grab: ConfigGrabMode) -> Vec<ProcessedUserEvent> {
+        let res = vec![match grab {
+            ConfigGrabMode::XCore => xreq(XRequest::Ungrab),
+            grab => future::err(format_err!("ungrab {:?} unimplemented", grab)).into(),
+        }];
+
+        *self.grabs.entry(grab).or_insert(false) = false;
+
+        res
+    }
+
+    fn map_input_arg<S: AsRef<OsStr>>(&self, s: &S, input: Option<u8>) -> OsString {
+        let s = s.as_ref();
+        if let Some(input) = input {
+            let bytes = s.as_bytes();
+            if bytes == b"{}" {
+                OsString::from(format!("{}", input))
+            } else if bytes == b"{:x}" {
+                OsString::from(format!("{:02x}", input))
+            } else if bytes == b"0x{:x}" {
+                OsString::from(format!("0x{:02x}", input))
+            } else {
+                s.to_owned()
+            }
+        } else {
+            s.to_owned()
+        }
+    }
+
+    fn show_guest(&mut self) -> Vec<ProcessedUserEvent> {
+        let showing_guest = self.showing_guest.clone();
+        match self.ddc_host {
+            ConfigDdcHost::None => vec![future::ok(()).into()],
+            ConfigDdcHost::Libddcutil => {
+                let ddc = self.ddc.clone();
+                let input = self.input_guest.clone();
+                let input_host = self.input_host.clone();
+                let input_host_value = self.input_host_value.clone();
+                vec![futures::sync::oneshot::spawn_fn(move || {
+                    let mut ddc = ddc.lock().map_err(|e| format_err!("DDC mutex poisoned {:?}", e))?;
+                    ddc.to_display()?;
+                    if let Some(input) = ddc.our_input() {
+                        if input_host.name.is_some() {
+                            if let Some(input) = ddc.match_input(&input_host) {
+                                input_host_value.store(input as _, Ordering::Relaxed);
+                            }
+                        } else {
+                            input_host_value.store(input as _, Ordering::Relaxed);
+                        }
+                    }
+                    if let Some(input) = ddc.match_input(&input) {
+                        ddc.set_input(input)
+                    } else {
+                        Err(format_err!("DDC guest input source not found"))
+                    }
+                }, &self.ddc_pool)
+                .inspect(move |&()| showing_guest.set(true))
+                .into()]
+            },
+            ConfigDdcHost::Ddcutil => {
+                vec![future::err(format_err!("ddcutil unimplemented")).into()]
+            },
+            ConfigDdcHost::Exec(ref args) => {
+                let input = self.input_guest.value;
+                vec![exec(&self.handle, args.into_iter().map(|i| self.map_input_arg(i, input)))
+                    .inspect(move |&()| showing_guest.set(true))
+                    .into()
+                ]
+            },
+        }
+    }
+
+    fn show_host(&mut self) -> Box<Future<Item=(), Error=Error>> {
+        let input_host_value = self.input_host_value.load(Ordering::Relaxed);
+        let input = self.input_host.value.or_else(|| if input_host_value < 0x100 { Some(input_host_value as u8) } else { None });
+        let showing_guest = self.showing_guest.clone();
+
+        match self.ddc_guest {
+            ConfigDdcGuest::None => {
+                self.showing_guest.set(false);
+                Box::new(future::ok(())) as Box<_>
+            }, // TODO: not really sure why this is an option
+            ConfigDdcGuest::Exec(ref args) => {
+                let input = self.input_guest.value;
+                Box::new(exec(&self.handle, args.into_iter().map(|i| self.map_input_arg(i, input)))
+                    .inspect(move |&()| showing_guest.set(false))
+                ) as Box<_>
+            },
+            ConfigDdcGuest::GuestExec(ref args) => {
+                Box::new(
+                    self.qemu.borrow_mut().guest_exec(args.into_iter().map(|i| self.map_input_arg(i, input)))
+                    .inspect(move |&()| showing_guest.set(false))
+                ) as Box<_>
+            },
+        }
+    }
+
+    fn process_user_event(&mut self, event: &ConfigEvent) -> Vec<ProcessedUserEvent> {
+        trace!("process_user_event({:?})", event);
+        info!("User event {:?}", event);
+        match *event {
+            ConfigEvent::ShowHost => {
+                user(self.show_host())
+            },
+            ConfigEvent::ShowGuest => {
+                self.show_guest()
+            },
+            ConfigEvent::Exec(ref args) => {
+                vec![exec(&self.handle, args).into()]
+            }
+            ConfigEvent::ToggleGrab(ref grab) => {
+                let mode = grab.mode();
+                if self.grabs.get(&mode) == Some(&true) {
+                    self.ungrab(mode)
+                } else {
+                    self.grab(grab)
+                }
+            }
+            ConfigEvent::ToggleShow => {
+                if self.showing_guest.get() {
+                    user(self.show_host())
+                } else {
+                    self.show_guest()
+                }
+            },
+            ConfigEvent::Grab(ref grab) => self.grab(grab),
+            ConfigEvent::Ungrab(grab) => self.ungrab(grab),
+            ConfigEvent::UnstickGuest => {
+                vec![xreq(XRequest::UnstickGuest)] // TODO: this shouldn't be necessary as a xevent
+            }
+            ConfigEvent::UnstickHost => {
+                vec![xreq(XRequest::UnstickHost)]
+            }
+            ConfigEvent::Poweroff => {
+                user(self.qemu.borrow_mut().guest_poweroff())
+            },
+        }
+    }
+}
+
+struct Qemu {
+    comm: ConfigQemuComm,
+    driver: ConfigQemuDriver,
+    qmp: Option<String>,
+    ga: Option<String>,
+    handle: Handle,
+}
+
+impl Qemu {
+    pub fn new(qemu: config::ConfigQemu, handle: Handle) -> Self {
+        Qemu {
+            comm: qemu.comm,
+            driver: qemu.driver,
+            qmp: qemu.qmp_socket,
+            ga: qemu.ga_socket,
+            handle: handle,
+        }
+    }
+
+    // TODO: none of these need to be mut probably?
+    pub fn guest_exec<I: IntoIterator<Item=S>, S: AsRef<OsStr>>(&mut self, args: I) -> Box<Future<Item=(), Error=Error>> {
+        match self.comm {
+            ConfigQemuComm::Qemucomm => {
+                if let Some(ga) = self.ga.as_ref() {
+                    exec(&self.handle,
+                         ["qemucomm", "-g", &ga, "exec", "-w"]
+                            .iter().map(|&s| s.to_owned())
+                        .chain(args.into_iter().map(|s| s.as_ref().to_string_lossy().into_owned()))
+                    )
+                } else {
+                    Box::new(future::err(format_err!("QEMU Guest Agent socket not provided"))) as Box<_>
+                }
+            },
+            ConfigQemuComm::QMP => {
+                unimplemented!()
+            },
+            ConfigQemuComm::Console => {
+                unimplemented!()
+            },
+        }
+    }
+
+    pub fn add_evdev<I: AsRef<OsStr>, D: AsRef<OsStr>>(&mut self, id: I, device: D) -> Box<Future<Item=(), Error=Error>> {
+        let id = id.as_ref().to_string_lossy();
+        let device = format!("evdev={}", device.as_ref().to_string_lossy());
+
+        let (driver, command) = match self.driver {
+            ConfigQemuDriver::Virtio => ("virtio-input-host", "add_device"),
+            ConfigQemuDriver::InputLinux => ("input-linux", "add_object"),
+        };
+
+        match self.comm {
+            ConfigQemuComm::Qemucomm => {
+                if let Some(qmp) = self.qmp.as_ref() {
+                    exec(&self.handle, ["qemucomm", "-q", &qmp, command, driver, &id[..], &device].iter().cloned())
+                } else {
+                    Box::new(future::err(format_err!("QEMU QMP socket not provided"))) as Box<_>
+                }
+            },
+            ConfigQemuComm::QMP => {
+                unimplemented!()
+            },
+            ConfigQemuComm::Console => {
+                unimplemented!()
+            },
+        }
+    }
+
+    pub fn remove_evdev<I: AsRef<OsStr>>(&mut self, id: I) -> Box<Future<Item=(), Error=Error>> {
+        let id = id.as_ref().to_string_lossy();
+
+        let command = match self.driver {
+            ConfigQemuDriver::Virtio => "del_device",
+            ConfigQemuDriver::InputLinux => "del_object",
+        };
+
+        match self.comm {
+            ConfigQemuComm::Qemucomm => {
+                if let Some(qmp) = self.qmp.as_ref() {
+                    exec(&self.handle, ["qemucomm", "-q", &qmp, command, &id[..]].iter().cloned())
+                } else {
+                    Box::new(future::err(format_err!("QEMU QMP socket not provided"))) as Box<_>
+                }
+            },
+            ConfigQemuComm::QMP => {
+                unimplemented!()
+            },
+            ConfigQemuComm::Console => {
+                unimplemented!()
+            },
+        }
+    }
+
+    pub fn guest_poweroff(&mut self) -> Box<Future<Item=(), Error=Error>> {
+        match self.comm {
+            ConfigQemuComm::Qemucomm => {
+                if let Some(qmp) = self.qmp.as_ref() {
+                    exec(&self.handle, ["qemucomm", "-q", &qmp, "poweroff"].iter().cloned())
+                } else {
+                    Box::new(future::err(format_err!("QEMU QMP socket not provided"))) as Box<_>
+                }
+            },
+            ConfigQemuComm::QMP => {
+                unimplemented!()
+            },
+            ConfigQemuComm::Console => {
+                unimplemented!()
+            },
+        }
+    }
+}
+
+fn exec<I: IntoIterator<Item=S>, S: AsRef<OsStr>>(ex: &Handle, args: I) -> Box<Future<Item=(), Error=Error>> {
+    fn exit_status_error(status: ExitStatus) -> Result<(), Error> {
+        if status.success() {
+            Ok(())
+        } else {
+            Err(if let Some(code) = status.code() {
+                format_err!("process exited with code {}", code)
+            } else {
+                format_err!("process exited with a failure")
+            })
+        }
+    }
+
+    let mut args = args.into_iter();
+    if let Some(cmd) = args.next() {
+        let child = Command::new(cmd).args(args).spawn_async(ex);
+        Box::new(future::result(child)
+            .and_then(|c| c).map_err(Error::from)
+            .and_then(exit_status_error)
+        ) as Box<_>
+    } else {
+        Box::new(future::err(format_err!("Missing exec command"))) as Box<_>
+    }
 }

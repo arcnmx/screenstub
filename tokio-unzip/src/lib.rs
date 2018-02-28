@@ -1,7 +1,8 @@
-use futures::future::Either;
+extern crate futures;
+
+use futures::future::{Either, Executor, ExecuteError};
 use futures::task::{self, Task};
-use futures::{Future, Stream, Sink, Async, Poll, IntoFuture};
-use tokio_core::reactor::Handle;
+use futures::{Future, Stream, Async, Poll, IntoFuture};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -10,20 +11,17 @@ pub trait StreamUnzipExt {
         Unzip::new(self)
     }
 
-    fn unzip_spawn<F: FnOnce(UnzipStream<Self, A, B>) -> U + 'static, U: IntoFuture<Item=(), Error=()> + 'static, A: 'static, B: 'static>(self, handle: &Handle, f: F) -> Unzip<Self, A, B> where Self: Sized + Stream<Item=(A, B)> + 'static {
+    fn unzip_spawn<E, F, U, FF, A, B>(self, executor: &E, f: F)
+        -> Result<Unzip<Self, A, B>, ExecuteError<FF>> where
+        Self: Sized + Stream<Item=(A, B)>,
+        E: Executor<FF>,
+        F: FnOnce(UnzipStream<Self, A, B>) -> U,
+        U: IntoFuture<Item=(), Error=(), Future=FF>,
+        FF: Future<Item=(), Error=()>,
+    {
         let (unzip, stream) = Unzip::new(self);
 
-        handle.spawn_fn(|| f(stream));
-
-        unzip
-    }
-
-    fn unzip_into<S: Sink<SinkItem=B, SinkError=()> + 'static, A: 'static, B: 'static>(self, handle: &Handle, sink: S) -> Unzip<Self, A, B> where Self: Sized + Stream<Item=(A, B)> + 'static {
-        let (unzip, stream) = Unzip::new(self);
-
-        handle.spawn(stream.forward(sink).map(drop));
-
-        unzip
+        executor.execute(f(stream).into_future()).map(|_| unzip)
     }
 }
 

@@ -2,19 +2,19 @@ extern crate mio;
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
-use self::mio::unix::EventedFd;
-use self::mio::event::Evented;
+use mio::unix::EventedFd;
+use mio::event::Evented;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 
+#[derive(Debug)]
 pub struct Fd<T> {
     fd: RawFd,
     inner: T,
 }
 
-pub fn open_options() -> OpenOptions {
+pub fn o_nonblock() -> OpenOptions {
     let mut o = OpenOptions::new();
-    o.read(true);
     o.custom_flags(0o4000); // O_NONBLOCK
     o
 }
@@ -38,6 +38,18 @@ impl<T: AsRawFd> Fd<T> {
             fd: inner.as_raw_fd(),
             inner: inner,
         }
+    }
+}
+
+impl<T: AsRawFd> AsRawFd for Fd<T> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+impl<T: AsRawFd> From<T> for Fd<T> {
+    fn from(t: T) -> Self {
+        Self::new(t)
     }
 }
 
