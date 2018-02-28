@@ -82,6 +82,10 @@ on startup:
 
     powershell -Command "Start-Process \"C:\Program Files\Qemu-ga\qemu-ga.exe\" -WindowStyle Hidden"
 
+This needs to run as admin, so you can use task scheduler for that pointing to
+a batch file containing the above:
+
+    schtasks /create /sc onlogon /tn qemu-ga /rl highest /tr "C:\path\to\qemu-ga.bat"
 
 ### macOS
 
