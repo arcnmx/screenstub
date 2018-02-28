@@ -4,6 +4,7 @@ version = "0.0.1"
 
 [dependencies]
 tokio-unzip = { path = "tokio-unzip" }
+tokio-fuse = { path = "tokio-fuse" }
 tokio-fd = { path = "tokio-fd" }
 screenstub-config = { path = "config" }
 screenstub-uinput = { path = "uinput" }
@@ -22,6 +23,7 @@ clap = "^2.30.0"
 env_logger = "^0.5.4"
 log = "^0.4.1"
 serde_yaml = "^0.7.3"
+result = "^1.0.0"
 
 [features]
 with-ddcutil = ["screenstub-ddc/with-ddcutil", "screenstub-config/with-ddcutil"]

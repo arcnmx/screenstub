@@ -4,7 +4,7 @@ extern crate serde_derive;
 extern crate serde;
 
 use std::collections::HashMap;
-use input::Key;
+use input::{Key, EventKind};
 
 pub type Config = Vec<ConfigScreen>;
 
@@ -155,6 +155,14 @@ pub enum ConfigGrab {
         devices: Vec<String>,
     },
     Evdev {
+        #[serde(default)]
+        exclusive: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_device_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        xcore_ignore: Vec<EventKind>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evdev_ignore: Vec<EventKind>,
         devices: Vec<String>,
     },
 }

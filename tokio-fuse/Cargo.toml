@@ -1,0 +1,6 @@
+[package]
+name = "tokio-fuse"
+version = "0.0.1"
+
+[dependencies]
+futures = "^0.1.18"

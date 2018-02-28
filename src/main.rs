@@ -13,9 +13,11 @@ extern crate screenstub_ddc as ddc;
 extern crate screenstub_x as x;
 extern crate tokio_unzip;
 extern crate tokio_timer;
+extern crate tokio_fuse;
 extern crate tokio_core;
 extern crate tokio_process;
 extern crate serde_yaml;
+extern crate result;
 extern crate clap;
 
 use std::collections::HashMap;
@@ -33,13 +35,15 @@ use tokio_core::reactor::{Core, Handle};
 use tokio_unzip::StreamUnzipExt;
 use tokio_process::CommandExt;
 use tokio_timer::Timer;
-use clap::{Arg, App, SubCommand, AppSettings};
+use tokio_fuse::SharedFuse;
 use futures::sync::mpsc;
 use futures::unsync::mpsc as un_mpsc;
 use futures::{Future, Stream, Sink, IntoFuture, stream, future};
 use futures_cpupool::CpuPool;
 use failure::Error;
-use input::InputId;
+use result::ResultOptionExt;
+use clap::{Arg, App, SubCommand, AppSettings};
+use input::{InputId, InputEvent, EventKind};
 use config::{
     Config, ConfigEvent, ConfigGrab, ConfigGrabMode,
     ConfigDdc, ConfigDdcHost, ConfigDdcGuest,
@@ -94,11 +98,11 @@ fn main_result() -> Result<i32, Error> {
         ("x", Some(..)) => {
             let config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
 
-            let (mut xsender, xreceiver) = mpsc::channel(0x20); // TODO: up this after testing that backpressure works
-            let (xreqsender, xreqreceiver) = mpsc::channel(0x08);
+            let (mut x_sender, x_receiver) = mpsc::channel(0x20); // TODO: up this after testing that backpressure works
+            let (xreq_sender, xreq_receiver) = mpsc::channel(0x08);
             let xthread = spawn(move || {
-                if let Err(res) = x::XContext::xmain(xreqreceiver, &mut xsender) {
-                    x::XContext::spin_send(&mut xsender, Err(res))
+                if let Err(res) = x::XContext::xmain(xreq_receiver, &mut x_sender) {
+                    x::XContext::spin_send(&mut x_sender, Err(res))
                 } else {
                     Ok(())
                 }
@@ -109,18 +113,27 @@ fn main_result() -> Result<i32, Error> {
                 .name_prefix("DDC")
                 .create();
 
-            let mut uinput = uinput::Builder::new();
-            uinput.name("screenstub");
-            uinput.id(&InputId {
+            let uinput_id = InputId {
                 bustype: input::sys::BUS_VIRTUAL,
                 vendor: 0x16c0,
                 product: 0x05df,
                 version: 1,
-            });
-            uinput.x_config();
-            let uinput = uinput.create()?;
-            let uinput_path = uinput.path().to_owned();
-            info!("uinput path: {}", uinput_path.display());
+            };
+            let uinput_abs = uinput::Builder::new()
+                .name("screenstub-abs")
+                .id(&uinput_id)
+                .x_config_abs().create()?;
+            let uinput_abs_path = uinput_abs.path().to_owned();
+            const UINPUT_ABS_ID: &'static str = "screenstub-abs";
+            info!("uinput abs path: {}", uinput_abs_path.display());
+
+            let uinput_rel = uinput::Builder::new()
+                .name("screenstub-rel")
+                .id(&uinput_id)
+                .x_config_rel().create()?;
+            let uinput_rel_path = uinput_rel.path().to_owned();
+            const UINPUT_REL_ID: &'static str = "screenstub-rel";
+            info!("uinput rel path: {}", uinput_rel_path.display());
 
             let mut core = Core::new()?;
             let core_handle = core.handle();
@@ -129,6 +142,9 @@ fn main_result() -> Result<i32, Error> {
 
             let mut qemu = Rc::new(RefCell::new(Qemu::new(config.qemu, core_handle.clone())));
 
+            let (input_organic_sender, input_organic_receiver) = un_mpsc::channel(0x10);
+            let (input_sender, input_receiver) = un_mpsc::channel(0x10);
+
             let mut user = UserProcess::new(core_handle.clone(),
                 ddc_pool,
                 convert_display(config.monitor),
@@ -136,6 +152,8 @@ fn main_result() -> Result<i32, Error> {
                 convert_input(config.guest_source),
                 config.ddc,
                 qemu.clone(),
+                input_organic_sender.clone(),
+                input_sender.clone(),
             );
             let user = Rc::new(RefCell::new(user));
 
@@ -148,31 +166,42 @@ fn main_result() -> Result<i32, Error> {
             let events = Rc::new(RefCell::new(events));
 
             let evdev_sleep = timer.sleep(Duration::from_secs(2)).map_err(Error::from);
-            core_handle.spawn(qemu.borrow_mut().remove_evdev("screenstub-abs")
-                .then(|_| evdev_sleep)
+            core_handle.spawn(qemu.borrow_mut().remove_evdev(UINPUT_ABS_ID)
+                .then({
+                    let qemu = qemu.clone();
+                    move |_| {
+                        let mut qemu = qemu.borrow_mut(); // wtf rust?
+                        qemu.remove_evdev(UINPUT_REL_ID)
+                    }
+                }).then(|_| evdev_sleep)
                 .and_then({
                     let qemu = qemu.clone();
                     move |_| {
                         let mut qemu = qemu.borrow_mut(); // wtf rust?
-                        qemu.add_evdev("screenstub-abs", uinput_path)
+                        qemu.add_evdev(UINPUT_ABS_ID, uinput_abs_path)
+                    }
+                }).and_then({
+                    let qemu = qemu.clone();
+                    move |_| {
+                        let mut qemu = qemu.borrow_mut(); // wtf rust?
+                        qemu.add_evdev(UINPUT_REL_ID, uinput_rel_path)
                     }
                 }).map_err(|e| error!("Failed to add uinput device to qemu {} {:?}", e, e))
                 .or_else(|_| Ok::<_, ()>(()))
             );
 
-            let (inputsender, inputreceiver) = un_mpsc::channel(0x10);
-            let uinput = uinput.to_sink(&core_handle)?;
-            core_handle.spawn(inputreceiver
+            let uinput_abs = uinput_abs.to_sink(&core_handle)?;
+            core_handle.spawn(input_receiver
                 .map({
                     let events = events.clone();
                     move |e| events.borrow_mut().map_input_event(e)
                 })
                 .map_err(|_| -> Error { unreachable!() })
-                .forward(uinput).map(drop).map_err(drop) // TODO: error handling
+                .forward(uinput_abs).map(drop).map_err(drop) // TODO: error handling
             );
 
-            let (usersender, userreceiver) = un_mpsc::channel::<Rc<ConfigEvent>>(0x08);
-            core_handle.spawn(userreceiver
+            let (user_sender, user_receiver) = un_mpsc::channel::<Rc<ConfigEvent>>(0x08);
+            core_handle.spawn(user_receiver
                 .map_err(|_| -> Error { unreachable!() })
                 .map({
                     let user = user.clone();
@@ -189,7 +218,7 @@ fn main_result() -> Result<i32, Error> {
                     ProcessedUserEvent::XRequest(e) => (None, Some(e)),
                 }).unzip_spawn(&core_handle, |s| s.filter_map(|e| e)
                     .map_err(|_| -> mpsc::SendError<_> { unreachable!() }) // ugh come on
-                    .forward(xreqsender).map(drop).map_err(drop)
+                    .forward(xreq_sender).map(drop).map_err(drop)
                 ).map_err(|e| format_err!("{:?}", e))? // ugh can this even fail?
                 .filter_map(|e| e)
                 .buffer_unordered(8)
@@ -197,7 +226,6 @@ fn main_result() -> Result<i32, Error> {
                 .for_each(|_| Ok(()))
             );
 
-            let (input_organic_sender, input_organic_receiver) = un_mpsc::channel(0x10);
             core_handle.spawn(input_organic_receiver
                 .map_err(|_| -> Error { unreachable!() })
                 .map({
@@ -205,10 +233,10 @@ fn main_result() -> Result<i32, Error> {
                     move |inputevent| stream::iter_ok::<_, Error>(events.borrow_mut().process_input_event(&inputevent))
                 }).flatten()
                 .map_err(|_| -> un_mpsc::SendError<_> { unreachable!() })
-                .forward(usersender.clone()).map(drop).map_err(drop)
+                .forward(user_sender.clone()).map(drop).map_err(drop)
             );
 
-            core.run(xreceiver
+            core.run(x_receiver
                 .map_err(|_| -> Error { unreachable!() })
                 .and_then(|e| e)
                 .map({
@@ -221,13 +249,13 @@ fn main_result() -> Result<i32, Error> {
                 }).unzip_spawn(&core_handle, |s| s.filter_map(|e| e)
                     .map(convert_user_event)
                     .map_err(|_| -> un_mpsc::SendError<_> { unreachable!() }) // ugh come on
-                    .forward(usersender).map(drop).map_err(drop)
+                    .forward(user_sender).map(drop).map_err(drop)
                 ).map_err(|e| format_err!("{:?}", e))? // ugh can this even fail?
                 .filter_map(|e| e)
-                .forward(inputsender.fanout(input_organic_sender)).map(drop).map_err(drop)
+                .forward(input_sender.fanout(input_organic_sender)).map(drop).map_err(drop)
             ).unwrap();
 
-            if let Err(e) = core.run(qemu.borrow_mut().remove_evdev("screenstub-abs")) {
+            if let Err(e) = core.run(qemu.borrow_mut().remove_evdev(UINPUT_ABS_ID)) {
                 error!("Failed to remove uinput device from qemu {} {:?}", e, e);
             }
 
@@ -325,7 +353,7 @@ impl<F: IntoFuture<Item=(), Error=Error> + 'static> From<F> for ProcessedUserEve
 }
 
 pub struct UserProcess {
-    grabs: HashMap<ConfigGrabMode, bool>,
+    grabs: Rc<RefCell<HashMap<ConfigGrabMode, Grab>>>,
     handle: Handle,
     ddc_pool: CpuPool,
     showing_guest: Rc<Cell<bool>>,
@@ -337,10 +365,12 @@ pub struct UserProcess {
     #[cfg(feature = "with-ddcutil")]
     ddc: Arc<Mutex<Monitor>>,
     qemu: Rc<RefCell<Qemu>>,
+    input_organic_sender: un_mpsc::Sender<InputEvent>,
+    input_sender: un_mpsc::Sender<InputEvent>,
 }
 
 impl UserProcess {
-    fn new(handle: Handle, ddc_pool: CpuPool, display: SearchDisplay, input_host: SearchInput, input_guest: SearchInput, ddc: ConfigDdc, qemu: Rc<RefCell<Qemu>>) -> Self {
+    fn new(handle: Handle, ddc_pool: CpuPool, display: SearchDisplay, input_host: SearchInput, input_guest: SearchInput, ddc: ConfigDdc, qemu: Rc<RefCell<Qemu>>, input_organic_sender: un_mpsc::Sender<InputEvent>, input_sender: un_mpsc::Sender<InputEvent>) -> Self {
         UserProcess {
             grabs: Default::default(),
             handle: handle,
@@ -354,6 +384,8 @@ impl UserProcess {
             ddc: Arc::new(Mutex::new(Monitor::new(display))),
             ddc_pool: ddc_pool,
             qemu: qemu,
+            input_organic_sender: input_organic_sender,
+            input_sender: input_sender,
         }
     }
 
@@ -361,22 +393,36 @@ impl UserProcess {
         let mode = grab.mode();
 
         let res = vec![match *grab {
-            ConfigGrab::XCore => xreq(XRequest::Grab),
-            ref grab => future::err(format_err!("grab unimplemented")).into(),
+            ConfigGrab::XCore => {
+                self.grabs.borrow_mut().insert(mode, Grab::XCore);
+                xreq(XRequest::Grab)
+            },
+            ref grab @ ConfigGrab::Evdev { .. } => {
+                let input_organic_sender = self.input_organic_sender.clone();
+                let input_sender = self.input_sender.clone();
+                let grab = grab.clone();
+                let grabs = self.grabs.clone();
+                let handle = self.handle.clone();
+                future::lazy(move || GrabEvdev::new(&grab, &handle, &input_organic_sender, &input_sender))
+                    .map(move |grab| {
+                        let mut grabs = grabs.borrow_mut();
+                        grabs.insert(mode, grab.into());
+                    }).into()
+            },
+            _ => future::err(format_err!("grab {:?} unimplemented", mode)).into(),
         }];
-
-        *self.grabs.entry(mode).or_insert(true) = true;
 
         res
     }
 
     fn ungrab(&mut self, grab: ConfigGrabMode) -> Vec<ProcessedUserEvent> {
         let res = vec![match grab {
-            ConfigGrabMode::XCore => xreq(XRequest::Ungrab),
+            ConfigGrabMode::XCore => {
+                self.grabs.borrow_mut().remove(&grab);
+                xreq(XRequest::Ungrab)
+            },
             grab => future::err(format_err!("ungrab {:?} unimplemented", grab)).into(),
         }];
-
-        *self.grabs.entry(grab).or_insert(false) = false;
 
         res
     }
@@ -403,7 +449,7 @@ impl UserProcess {
         match self.ddc_guest {
             ConfigDdcGuest::None | ConfigDdcGuest::Exec(..) =>
                 Box::new(future::ok(())) as Box<_>,
-            ConfigDdcGuest::GuestExec(ref args) =>
+            ConfigDdcGuest::GuestExec(..) =>
                 Box::new(self.qemu.borrow_mut().guest_info()) as Box<_>,
         }
     }
@@ -493,7 +539,7 @@ impl UserProcess {
             }
             ConfigEvent::ToggleGrab(ref grab) => {
                 let mode = grab.mode();
-                if self.grabs.get(&mode) == Some(&true) {
+                if self.grabs.borrow().contains_key(&mode) {
                     self.ungrab(mode)
                 } else {
                     self.grab(grab)
@@ -710,5 +756,111 @@ fn exec<I: IntoIterator<Item=S>, S: AsRef<OsStr>>(ex: &Handle, args: I) -> Box<F
         ) as Box<_>
     } else {
         Box::new(future::err(format_err!("Missing exec command"))) as Box<_>
+    }
+}
+
+pub enum Grab {
+    XCore,
+    Evdev(GrabEvdev),
+}
+
+impl From<GrabEvdev> for Grab {
+    fn from(g: GrabEvdev) -> Self {
+        Grab::Evdev(g)
+    }
+}
+
+pub struct GrabEvdev {
+    uinput: Option<SharedFuse<uinput::UInputSink>>,
+    devices: Vec<(InputId, SharedFuse<uinput::UInputSink>)>,
+}
+
+impl GrabEvdev {
+    fn new(grab: &ConfigGrab, handle: &Handle, evdev_sender0: &un_mpsc::Sender<InputEvent>, evdev_sender1: &un_mpsc::Sender<InputEvent>) -> Result<Self, Error> {
+        match *grab {
+            ConfigGrab::Evdev { exclusive, ref new_device_name, ref xcore_ignore, ref evdev_ignore, ref devices } => {
+                let mut uinput = if let &Some(ref name) = new_device_name {
+                    let uinput_id = InputId {
+                        bustype: input::sys::BUS_VIRTUAL,
+                        vendor: 0x16c0,
+                        product: 0x05df,
+                        version: 1,
+                    };
+                    let mut builder = uinput::Builder::new();
+                    builder.name(&format!("screenstub-evdev-{}", name))
+                        .id(&uinput_id);
+                    Some(builder)
+                } else {
+                    None
+                };
+
+                let mut evdevs = Vec::new();
+                for dev in devices {
+                    let dev = uinput::Evdev::open(dev)?;
+
+                    let evdev = dev.evdev();
+
+                    if let Some(ref mut uinput) = uinput {
+                        uinput.from_evdev(&evdev)?;
+                    }
+
+                    if exclusive {
+                        evdev.grab(true)?;
+                    }
+
+                    let id = evdev.device_id()?;
+                    let dev = SharedFuse::new(dev.to_sink(handle)?);
+                    evdevs.push((id, dev));
+                }
+
+                let uinput = uinput.map(|u| u.create().and_then(|u| u.to_sink(handle))).invert()?;
+                let uinput = uinput.map(SharedFuse::new);
+
+                if let Some(ref uinput) = uinput {
+                    for dev in evdevs.iter().map(|&(_, ref dev)| dev).cloned() {
+                        let filters = evdev_ignore.clone();
+                        handle.spawn(dev
+                            .filter(move |e| Self::filter_event(e, &filters))
+                            .map_err(|_| -> io::Error { unreachable!() })
+                            .forward(uinput.clone()).map(drop).map_err(drop)
+                        );
+                    }
+                } else {
+                    for dev in evdevs.iter().map(|&(_, ref dev)| dev).cloned() {
+                        let filters = evdev_ignore.clone();
+                        handle.spawn(dev
+                            .filter(move |e| Self::filter_event(e, &filters))
+                            .map_err(|_| -> un_mpsc::SendError<_> { unreachable!() })
+                            .forward(evdev_sender0.clone().fanout(evdev_sender1.clone())).map(drop).map_err(drop)
+                        );
+                    }
+                }
+
+
+                Ok(GrabEvdev {
+                    uinput: uinput,
+                    devices: evdevs,
+                })
+            },
+            _ => panic!(),
+        }
+    }
+
+    fn filter_event(e: &InputEvent, list: &[EventKind]) -> bool {
+        // TODO: filter buttons and keys separately?
+        !list.contains(&e.kind)
+    }
+}
+
+impl Drop for GrabEvdev {
+    fn drop(&mut self) {
+        for (_, mut dev) in self.devices.drain(..) {
+            dev.fuse_inner();
+        }
+
+        if let Some(mut uinput) = self.uinput.take() {
+            uinput.fuse_inner();
+        }
+
     }
 }

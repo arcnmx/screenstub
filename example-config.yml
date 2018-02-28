@@ -51,8 +51,13 @@
   - triggers: [KeyY]
     modifiers: [KeyLeftMeta]
     events:
+    - toggle_grab: xcore
     - toggle_grab:
-        evdev: # CURRENTLY UNIMPLEMENTED
+        evdev:
+          exclusive: false # grab exclusive access from the device(s)
+          #new_device_name: "unique-grab-name" # create a new uinput device for this grab
+          xcore_ignore: [Absolute] # which events to ignore from the window (options are Key, Absolute)
+          evdev_ignore: [Key] # which events to ignore from the evdev device
           devices: # List of devices to forward to guest
           - /dev/input/by-id/etc
     - unstick_host # force-depress all Xorg keys (prevents keys getting stuck)

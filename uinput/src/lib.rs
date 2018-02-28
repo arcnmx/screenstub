@@ -15,7 +15,12 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::{self, Write};
 use std::{mem, slice};
-use input::{UInputHandle, EvdevHandle, InputEvent, EventKind, AbsoluteAxis, Key, Bitmask, InputId, AbsoluteInfoSetup, AbsoluteInfo};
+use input::{
+    UInputHandle, EvdevHandle, InputId,
+    InputEvent, EventKind,
+    AbsoluteAxis, RelativeAxis, Key,
+    AbsoluteInfoSetup, AbsoluteInfo, Bitmask,
+};
 use input::EventCodec;
 use tokio_core::reactor::{Handle, PollEvented};
 use tokio_io::AsyncRead;
@@ -64,12 +69,19 @@ impl Builder {
         self
     }
 
-    pub fn x_config(&mut self) -> &mut Self {
-        self.bits_events.set(EventKind::Key);
-        // autorepeat is undesired, the VM will have its own implementation
-        //self.bits_events.set(EventKind::Autorepeat); // kernel should handle this for us as long as it's set
+    pub fn x_config_rel(&mut self) -> &mut Self {
+        self.x_config_();
+        self.bits_events.set(EventKind::Relative);
+        for &axis in &[RelativeAxis::X, RelativeAxis::Y] {
+            self.bits_rel.set(axis);
+        }
+
+        self
+    }
+
+    pub fn x_config_abs(&mut self) -> &mut Self {
+        self.x_config_();
         self.bits_events.set(EventKind::Absolute);
-        self.bits_keys.or(Key::iter());
         for &axis in &[AbsoluteAxis::X, AbsoluteAxis::Y] {
             self.absolute_axis(AbsoluteInfoSetup {
                 axis: axis,
@@ -82,6 +94,13 @@ impl Builder {
         }
 
         self
+    }
+
+    fn x_config_(&mut self) {
+        self.bits_events.set(EventKind::Key);
+        // autorepeat is undesired, the VM will have its own implementation
+        //self.bits_events.set(EventKind::Autorepeat); // kernel should handle this for us as long as it's set
+        self.bits_keys.or(Key::iter());
     }
 
     pub fn from_evdev(&mut self, evdev: &EvdevHandle) -> io::Result<&mut Self> {
