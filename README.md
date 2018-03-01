@@ -15,12 +15,12 @@ something like Synergy.
 
 1. Install the [dependencies](#dependencies).
 2. Install screenstub via [cargo](#installation).
-  1. Run `screenstub detect` to check that DDC/CI is working and your monitor
-     is detected. You may need to enable DDC/CI in your monitor's settings, or
-     [adjust settings if you have an NVIDIA card on the host](#nvidia).
-3. Install and set up [qemu-ga to run on Windows startup](#qemu-guest-agent).
-4. Install a [command-line DDC/CI program in Windows](#windows).
-5. [Configure](#configuration) screenstub by modifying the example as necessary,
+3. Run `screenstub detect` to check that DDC/CI is working and your monitor
+   is detected. You may need to enable DDC/CI in your monitor's settings, or
+   [adjust settings if you have an NVIDIA card on the host](#nvidia).
+4. Install and set up [qemu-ga to run on Windows startup](#qemu-guest-agent).
+5. Install a [command-line DDC/CI program in Windows](#windows).
+6. [Configure](#configuration) screenstub by modifying the example as necessary,
    and setting up [the QEMU sockets](#qemu-control-sockets) and [permissions](#input-permissions).
 
 ## Installation
