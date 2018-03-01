@@ -16,6 +16,7 @@ addons:
     - libdrm-dev
     - libxcb1-dev
     - libxcb-xtest0-dev
+    - libxcb-xkb-dev
 cache:
   directories:
   - "$HOME/.cargo"
