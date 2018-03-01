@@ -22,7 +22,8 @@ something like Synergy.
 5. Install a [command-line DDC/CI program in Windows](#windows).
 6. [Configure](#configuration) screenstub by modifying the example as necessary,
    and setting up [the QEMU sockets](#qemu-control-sockets), [permissions](#input-permissions),
-   and check your [input devices](#guest-input-drivers).
+   and check your [input devices](#guest-input-drivers). Also [prevent X from
+   ruining things](#host-xorg-configuration).
 
 ## Installation
 
@@ -48,7 +49,7 @@ this probably will need to be compiled from source.
 
 ## Configuration
 
-An [example configuration](example-config.yml) is available to use as a starting
+An [example configuration](samples/config.yml) is available to use as a starting
 point. There are a few specific items that need to be set up for everything to
 work. The `screenstub detect` command can be used to find information about
 DDC/CI capable monitors and their inputs.
@@ -80,6 +81,12 @@ driver.
 
 Using virtio input drivers (vioinput) instead is recommended for performance
 reasons but requires installation of the appropriate drivers in the VM.
+
+### Host Xorg Configuration
+
+Copy [the xorg config](samples/xorg.conf.d/30-screenstub.conf) into your
+`xorg.conf` or `/etc/X11/xorg.conf.d/` directory to prevent Xorg from trying to
+use the virtual input devices for the host.
 
 ### Host Control
 
