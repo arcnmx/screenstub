@@ -59,7 +59,7 @@
           xcore_ignore: [absolute, button] # which events to ignore from the window (key, button, absolute)
           evdev_ignore: [key] # which events to ignore from the evdev device
           devices: # List of devices to forward to guest
-          - /dev/input/by-id/etc
+          - /dev/input/by-id/my-event-mouse
     - unstick_host # force-depress all Xorg keys (prevents keys getting stuck)
   - triggers: [KeyT]
     modifiers: [KeyLeftMeta]

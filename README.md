@@ -21,7 +21,8 @@ something like Synergy.
 4. Install and set up [qemu-ga to run on Windows startup](#qemu-guest-agent).
 5. Install a [command-line DDC/CI program in Windows](#windows).
 6. [Configure](#configuration) screenstub by modifying the example as necessary,
-   and setting up [the QEMU sockets](#qemu-control-sockets) and [permissions](#input-permissions).
+   and setting up [the QEMU sockets](#qemu-control-sockets), [permissions](#input-permissions),
+   and check your [input devices](#guest-input-drivers).
 
 ## Installation
 
@@ -68,6 +69,16 @@ to be passed to QEMU (note libvirt may already expose some of these for you):
 Ensure that the user running it has proper permissions to both. udev can be used
 to set up access for a particular user or group.
 
+### Guest Input Drivers
+
+For `input-linux` to work properly you must remove all USB mouse devices from
+your QEMU command line (`-usbdevice mouse`, `-usbdevice tablet`, `-device usb-mouse`, `-device usb-tablet`).
+You may keep a USB keyboard (`-device usb-kbd`) but this tends to interfere with
+the USB mouse, so it is recommended to leave this out and use the PS/2 keyboard
+driver.
+
+Using virtio input drivers (vioinput) instead is recommended for performance
+reasons but requires installation of the appropriate drivers in the VM.
 
 ### Host Control
 

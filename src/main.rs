@@ -44,7 +44,7 @@ use futures_cpupool::CpuPool;
 use failure::Error;
 use result::ResultOptionExt;
 use clap::{Arg, App, SubCommand, AppSettings};
-use input::{InputId, InputEvent};
+use input::{InputId, InputEvent, RelativeAxis};
 use config::{
     Config, ConfigEvent, ConfigGrab, ConfigGrabMode, ConfigInputEvent,
     ConfigDdc, ConfigDdcHost, ConfigDdcGuest,
@@ -139,7 +139,7 @@ fn main_result() -> Result<i32, Error> {
             let mut core = Core::new()?;
             let core_handle = core.handle();
 
-            let timer = Timer::default();
+            let timer = Rc::new(Timer::default());
 
             let mut qemu = Rc::new(RefCell::new(Qemu::new(config.qemu, core_handle.clone())));
 
@@ -158,6 +158,7 @@ fn main_result() -> Result<i32, Error> {
                 input_organic_sender.clone(),
                 input_rel_sender.clone(),
                 x_input_filter.clone(),
+                timer.clone(),
             );
             let user = Rc::new(RefCell::new(user));
 
@@ -189,6 +190,12 @@ fn main_result() -> Result<i32, Error> {
                     move |_| {
                         let mut qemu = qemu.borrow_mut(); // wtf rust?
                         qemu.add_evdev(UINPUT_REL_ID, uinput_rel_path)
+                    }
+                }).and_then({
+                    let qemu = qemu.clone();
+                    move |_| {
+                        let mut qemu = qemu.borrow_mut(); // wtf rust?
+                        qemu.set_is_mouse(false)
                     }
                 }).map_err(|e| error!("Failed to add uinput device to qemu {} {:?}", e, e))
                 .or_else(|_| Ok::<_, ()>(()))
@@ -387,10 +394,11 @@ pub struct UserProcess {
     input_organic_sender: un_mpsc::Sender<InputEvent>,
     input_rel_sender: un_mpsc::Sender<InputEvent>,
     x_input_filter: Rc<RefCell<InputEventFilter>>,
+    timer: Rc<Timer>,
 }
 
 impl UserProcess {
-    fn new(handle: Handle, ddc_pool: CpuPool, display: SearchDisplay, input_host: SearchInput, input_guest: SearchInput, ddc: ConfigDdc, qemu: Rc<RefCell<Qemu>>, input_organic_sender: un_mpsc::Sender<InputEvent>, input_rel_sender: un_mpsc::Sender<InputEvent>, x_input_filter: Rc<RefCell<InputEventFilter>>) -> Self {
+    fn new(handle: Handle, ddc_pool: CpuPool, display: SearchDisplay, input_host: SearchInput, input_guest: SearchInput, ddc: ConfigDdc, qemu: Rc<RefCell<Qemu>>, input_organic_sender: un_mpsc::Sender<InputEvent>, input_rel_sender: un_mpsc::Sender<InputEvent>, x_input_filter: Rc<RefCell<InputEventFilter>>, timer: Rc<Timer>) -> Self {
         UserProcess {
             grabs: Default::default(),
             handle: handle,
@@ -407,6 +415,7 @@ impl UserProcess {
             input_organic_sender: input_organic_sender,
             input_rel_sender: input_rel_sender,
             x_input_filter: x_input_filter,
+            timer: timer,
         }
     }
 
@@ -425,12 +434,35 @@ impl UserProcess {
                 let grabs = self.grabs.clone();
                 let handle = self.handle.clone();
                 let x_filter = self.x_input_filter.clone();
+                let qemu = self.qemu.clone();
+                let timer = self.timer.clone();
                 future::lazy(move || GrabEvdev::new(&grab, &handle, &input_organic_sender, &input_rel_sender).map(|g| (grab, g)))
                     .map(move |(grabconf, grab)| {
                         let mut grabs = grabs.borrow_mut();
+                        let uinput = grab.uinput_path().and_then(|p| grab.uinput_id().map(|n| (p.to_owned(), n.to_owned())));
+                        let is_mouse = grab.is_mouse;
                         grabs.insert(mode, grab.into());
                         x_filter.borrow_mut().set_filter(xcore_ignore(&grabconf).iter().cloned());
-                    }).into()
+                        (uinput, is_mouse)
+                    })
+                    .and_then(move |(uinput, is_mouse)| {
+                        let future = {
+                            let mut qemu = qemu.borrow_mut();
+                            qemu.set_is_mouse(is_mouse)
+                        };
+                        future.map(|_| uinput.map(|(d, i)| (d, i, qemu)))
+                    }).and_then(move |uinput| if uinput.is_some() {
+                        Box::new(timer.sleep(Duration::from_secs(2)).map_err(Error::from).map(|_| uinput)) as Box<_>
+                    } else {
+                        Box::new(future::ok(uinput)) as Box<Future<Item=_, Error=_>>
+                    }).and_then(|uinput| if let Some((dev, id, qemu)) = uinput {
+                        let qemu: Rc<RefCell<Qemu>> = qemu; // why is this necessary???
+                        let mut qemu = qemu.borrow_mut();
+                        qemu.add_evdev(id, dev)
+                    } else {
+                        Box::new(future::ok(())) as Box<_>
+                    })
+                .into()
             },
             _ => future::err(format_err!("grab {:?} unimplemented", mode)).into(),
         }];
@@ -446,9 +478,19 @@ impl UserProcess {
             },
             ConfigGrabMode::Evdev => {
                 if let Some(Grab::Evdev(grab)) = self.grabs.borrow_mut().remove(&grab) {
+                    let future = self.qemu.borrow_mut().set_is_mouse(false);
+                    let future = if let Some(id) = grab.uinput_id() {
+                        let remove = self.qemu.borrow_mut().remove_evdev(id);
+                        remove.and_then(|_| future).into()
+                    } else {
+                        future.into()
+                    };
                     self.x_input_filter.borrow_mut().unset_filter(grab.xcore_ignore.iter().cloned());
+
+                    future
+                } else {
+                    future::ok(()).into()
                 }
-                future::ok(()).into()
             },
             grab => future::err(format_err!("ungrab {:?} unimplemented", grab)).into(),
         }];
@@ -669,13 +711,17 @@ impl Qemu {
     }
 
     pub fn add_evdev<I: AsRef<OsStr>, D: AsRef<OsStr>>(&mut self, id: I, device: D) -> Box<Future<Item=(), Error=Error>> {
-        let id = id.as_ref().to_string_lossy();
         let device = format!("evdev={}", device.as_ref().to_string_lossy());
 
-        let (driver, command) = match self.driver {
-            ConfigQemuDriver::Virtio => ("virtio-input-host", "add_device"),
-            ConfigQemuDriver::InputLinux => ("input-linux", "add_object"),
-        };
+        match self.driver {
+            ConfigQemuDriver::Virtio => self.add_device(id, "virtio-input-host", &[device]),
+            ConfigQemuDriver::InputLinux => self.add_object(id, "input-linux", &[device]),
+        }
+    }
+
+    pub fn add_object<I: AsRef<OsStr>, D: AsRef<OsStr>, PP: AsRef<OsStr>, P: IntoIterator<Item=PP>>(&mut self, id: I, driver: D, params: P) -> Box<Future<Item=(), Error=Error>> {
+        let id = id.as_ref().to_string_lossy();
+        let driver = driver.as_ref().to_string_lossy();
 
         match self.comm {
             ConfigQemuComm::None => {
@@ -683,7 +729,35 @@ impl Qemu {
             },
             ConfigQemuComm::Qemucomm => {
                 if let Some(qmp) = self.qmp.as_ref() {
-                    exec(&self.handle, ["qemucomm", "-q", &qmp, command, driver, &id[..], &device].iter().cloned())
+                    exec(&self.handle, ["qemucomm", "-q", &qmp, "add_object", &driver[..], &id[..]].iter()
+                         .map(|&s| s.to_owned()).chain(params.into_iter().map(|p| p.as_ref().to_string_lossy().into_owned()))
+                    )
+                } else {
+                    Box::new(future::err(format_err!("QEMU QMP socket not provided"))) as Box<_>
+                }
+            },
+            ConfigQemuComm::QMP => {
+                unimplemented!()
+            },
+            ConfigQemuComm::Console => {
+                unimplemented!()
+            },
+        }
+    }
+
+    pub fn add_device<I: AsRef<OsStr>, D: AsRef<OsStr>, PP: AsRef<OsStr>, P: IntoIterator<Item=PP>>(&mut self, id: I, driver: D, params: P) -> Box<Future<Item=(), Error=Error>> {
+        let id = id.as_ref().to_string_lossy();
+        let driver = driver.as_ref().to_string_lossy();
+
+        match self.comm {
+            ConfigQemuComm::None => {
+                Box::new(future::ok(())) as Box<_>
+            },
+            ConfigQemuComm::Qemucomm => {
+                if let Some(qmp) = self.qmp.as_ref() {
+                    exec(&self.handle, ["qemucomm", "-q", &qmp, "add_device", &driver[..], &id[..]].iter()
+                         .map(|&s| s.to_owned()).chain(params.into_iter().map(|p| p.as_ref().to_string_lossy().into_owned()))
+                    )
                 } else {
                     Box::new(future::err(format_err!("QEMU QMP socket not provided"))) as Box<_>
                 }
@@ -698,30 +772,9 @@ impl Qemu {
     }
 
     pub fn remove_evdev<I: AsRef<OsStr>>(&mut self, id: I) -> Box<Future<Item=(), Error=Error>> {
-        let id = id.as_ref().to_string_lossy();
-
-        let command = match self.driver {
-            ConfigQemuDriver::Virtio => "del_device",
-            ConfigQemuDriver::InputLinux => "del_object",
-        };
-
-        match self.comm {
-            ConfigQemuComm::None => {
-                Box::new(future::ok(())) as Box<_>
-            },
-            ConfigQemuComm::Qemucomm => {
-                if let Some(qmp) = self.qmp.as_ref() {
-                    exec(&self.handle, ["qemucomm", "-q", &qmp, command, &id[..]].iter().cloned())
-                } else {
-                    Box::new(future::err(format_err!("QEMU QMP socket not provided"))) as Box<_>
-                }
-            },
-            ConfigQemuComm::QMP => {
-                unimplemented!()
-            },
-            ConfigQemuComm::Console => {
-                unimplemented!()
-            },
+        match self.driver {
+            ConfigQemuDriver::Virtio => self.remove_device(id),
+            ConfigQemuDriver::InputLinux => self.remove_object(id),
         }
     }
 
@@ -748,6 +801,74 @@ impl Qemu {
             },
             ConfigQemuComm::Console => {
                 unimplemented!()
+            },
+        }
+    }
+
+    pub fn remove_object<I: AsRef<OsStr>>(&mut self, id: I) -> Box<Future<Item=(), Error=Error>> {
+        let id = id.as_ref().to_string_lossy();
+
+        match self.comm {
+            ConfigQemuComm::None => {
+                Box::new(future::ok(())) as Box<_>
+            },
+            ConfigQemuComm::Qemucomm => {
+                if let Some(qmp) = self.qmp.as_ref() {
+                    exec(&self.handle, ["qemucomm", "-q", &qmp, "del_object", &id[..]].iter().cloned())
+                } else {
+                    Box::new(future::err(format_err!("QEMU QMP socket not provided"))) as Box<_>
+                }
+            },
+            ConfigQemuComm::QMP => {
+                unimplemented!()
+            },
+            ConfigQemuComm::Console => {
+                unimplemented!()
+            },
+        }
+    }
+
+    pub fn remove_device<I: AsRef<OsStr>>(&mut self, id: I) -> Box<Future<Item=(), Error=Error>> {
+        let id = id.as_ref().to_string_lossy();
+
+        match self.comm {
+            ConfigQemuComm::None => {
+                Box::new(future::ok(())) as Box<_>
+            },
+            ConfigQemuComm::Qemucomm => {
+                if let Some(qmp) = self.qmp.as_ref() {
+                    exec(&self.handle, ["qemucomm", "-q", &qmp, "del_device", &id[..]].iter().cloned())
+                } else {
+                    Box::new(future::err(format_err!("QEMU QMP socket not provided"))) as Box<_>
+                }
+            },
+            ConfigQemuComm::QMP => {
+                unimplemented!()
+            },
+            ConfigQemuComm::Console => {
+                unimplemented!()
+            },
+        }
+    }
+
+    pub fn set_is_mouse(&mut self, is_mouse: bool) -> Box<Future<Item=(), Error=Error>> {
+        match self.driver {
+            ConfigQemuDriver::Virtio => Box::new(future::ok(())) as Box<_>,
+            ConfigQemuDriver::InputLinux => {
+                const ID_MOUSE: &'static str = "screenstub-usbmouse";
+                const ID_TABLET: &'static str = "screenstub-usbtablet";
+                let (new, new_driver, old) = if is_mouse {
+                    (ID_MOUSE, "usb-mouse", ID_TABLET)
+                } else {
+                    (ID_TABLET, "usb-tablet", ID_MOUSE)
+                };
+
+                let remove = self.remove_device(old);
+                let add = self.add_device(new, new_driver, Vec::<String>::new());
+                Box::new(
+                    remove.or_else(|_| Ok(()))
+                    .and_then(|_| add.or_else(|_| Ok(())))
+                ) as Box<_>
             },
         }
     }
@@ -800,9 +921,10 @@ impl From<GrabEvdev> for Grab {
 }
 
 pub struct GrabEvdev {
-    uinput: Option<(SharedFuse<uinput::UInputSink>, PathBuf)>,
+    uinput: Option<(SharedFuse<uinput::UInputSink>, PathBuf, String)>,
     devices: Vec<(InputId, SharedFuse<uinput::UInputSink>)>,
     xcore_ignore: Vec<ConfigInputEvent>,
+    is_mouse: bool,
 }
 
 impl GrabEvdev {
@@ -817,21 +939,28 @@ impl GrabEvdev {
                         version: 1,
                     };
                     let mut builder = uinput::Builder::new();
-                    builder.name(&format!("screenstub-evdev-{}", name))
+                    let name = format!("screenstub-evdev-{}", name);
+                    builder.name(&name)
                         .id(&uinput_id);
-                    Some(builder)
+                    Some((builder, name))
                 } else {
                     None
                 };
 
+                let mut is_mouse = false;
                 let mut evdevs = Vec::new();
                 for dev in devices {
                     let dev = uinput::Evdev::open(dev)?;
 
                     let evdev = dev.evdev();
 
-                    if let Some(ref mut uinput) = uinput {
+                    if let Some((ref mut uinput, _)) = uinput {
                         uinput.from_evdev(&evdev)?;
+                    }
+
+                    let rel = evdev.relative_bits()?;
+                    if rel.get(RelativeAxis::X) || rel.get(RelativeAxis::Y) {
+                        is_mouse = true;
                     }
 
                     if exclusive {
@@ -843,12 +972,12 @@ impl GrabEvdev {
                     evdevs.push((id, dev));
                 }
 
-                let uinput = uinput.map(|u| u.create()).invert()?.map(|u| {
+                let uinput = uinput.map(|(u, name)| u.create().map(|u| (u, name))).invert()?.map(|(u, name)| {
                     let p = u.path().to_owned();
-                    u.to_sink(handle).map(|u| (SharedFuse::new(u), p))
+                    u.to_sink(handle).map(|u| (SharedFuse::new(u), p, name))
                 }).invert()?;
 
-                if let Some((ref uinput, _)) = uinput {
+                if let Some((ref uinput, _, _)) = uinput {
                     for dev in evdevs.iter().map(|&(_, ref dev)| dev).cloned() {
                         let filters = InputEventFilter::new(evdev_ignore.iter().cloned());
                         handle.spawn(dev
@@ -873,6 +1002,7 @@ impl GrabEvdev {
                     uinput: uinput,
                     devices: evdevs,
                     xcore_ignore: xcore_ignore.clone(),
+                    is_mouse: is_mouse,
                 })
             },
             _ => panic!(),
@@ -880,7 +1010,11 @@ impl GrabEvdev {
     }
 
     pub fn uinput_path(&self) -> Option<&Path> {
-        self.uinput.as_ref().map(|&(_, ref p)| p.as_path())
+        self.uinput.as_ref().map(|&(_, ref p, _)| p.as_path())
+    }
+
+    pub fn uinput_id(&self) -> Option<&str> {
+        self.uinput.as_ref().map(|&(_, _, ref n)| &n[..])
     }
 }
 
@@ -890,7 +1024,7 @@ impl Drop for GrabEvdev {
             dev.fuse_inner();
         }
 
-        if let Some((mut uinput, _)) = self.uinput.take() {
+        if let Some((mut uinput, _, _)) = self.uinput.take() {
             uinput.fuse_inner();
         }
 
