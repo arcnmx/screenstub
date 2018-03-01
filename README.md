@@ -11,6 +11,17 @@ VM input when its workspace is visible. Many options are available for working
 with input forwarding to a VM, and if used without DDC/CI it becomes similar to
 something like Synergy.
 
+## Setup Overview
+
+1. Install the [dependencies](#dependencies).
+2. Install screenstub via [cargo](#installation).
+  1. Run `screenstub detect` to check that DDC/CI is working and your monitor
+     is detected. You may need to enable DDC/CI in your monitor's settings, or
+     [adjust settings if you have an NVIDIA card on the host](#nvidia).
+3. Install and set up [qemu-ga to run on Windows startup](#qemu-guest-agent).
+4. Install a [command-line DDC/CI program in Windows](#windows).
+5. [Configure](#configuration) screenstub by modifying the example as necessary,
+   and setting up [the QEMU sockets](#qemu-control-sockets) and [permissions](#input-permissions).
 
 ## Installation
 
@@ -38,6 +49,24 @@ An [example configuration](example-config.yml) is available to use as a starting
 point. There are a few specific items that need to be set up for everything to
 work. The `screenstub detect` command can be used to find information about
 DDC/CI capable monitors and their inputs.
+
+### QEMU Control Sockets
+
+`screenstub` requires both QMP and guest agent sockets available to properly
+control the VM and QEMU itself. This requires something similar command-line flags
+to be passed to QEMU (note libvirt may already expose some of these for you):
+
+    -chardev socket,path=/run/vfio/qga,server,nowait,id=qga0
+    -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0
+    -chardev socket,path=/run/vfio/qmp,server,nowait,id=qmp0
+    -mon chardev=qmp0,id=qmp,mode=control
+
+### Input Permissions
+
+`screenstub` needs access to both `/dev/input/event*` devices and `/dev/uinput`.
+Ensure that the user running it has proper permissions to both. udev can be used
+to set up access for a particular user or group.
+
 
 ### Host Control
 
