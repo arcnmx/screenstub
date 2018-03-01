@@ -23,8 +23,8 @@
     comm: qemucomm # https://github.com/arcnmx/qemucomm/blob/master/qemucomm must be in $PATH
     #comm: qmp # QMP socket type "mode=control" # CURRENTLY UNIMPLEMENTED
     #comm: console # QMP socket type "mode=readline" # CURRENTLY UNIMPLEMENTED
-    qmp_socket: /run/vfio/qmp # path to QMP socket
-    ga_socket: /run/vfio/qga # path to Guest Agent socket
+    qmp_socket: /tmp/vfio-qmp # path to QMP socket
+    ga_socket: /tmp/vfio-qga # path to Guest Agent socket
   key_remap: # Arbitrary keys can be remapped in the guest
     # See https://github.com/arcnmx/input-linux-rs/blob/master/src/keys.rs for a list of key names available (mouse buttons can also be used)
     KeyLeftMeta: KeyReserved # disable the windows key
@@ -56,8 +56,8 @@
         evdev:
           exclusive: false # grab exclusive access from the device(s)
           #new_device_name: "unique-grab-name" # create a new uinput device for this grab
-          xcore_ignore: [Absolute] # which events to ignore from the window (options are Key, Absolute)
-          evdev_ignore: [Key] # which events to ignore from the evdev device
+          xcore_ignore: [absolute, button] # which events to ignore from the window (key, button, absolute)
+          evdev_ignore: [key] # which events to ignore from the evdev device
           devices: # List of devices to forward to guest
           - /dev/input/by-id/etc
     - unstick_host # force-depress all Xorg keys (prevents keys getting stuck)

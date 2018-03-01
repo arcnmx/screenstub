@@ -41,6 +41,7 @@ this probably will need to be compiled from source.
     support.
 - [qemucomm](https://github.com/arcnmx/qemucomm/blob/master/qemucomm) must be
   installed, executable, and available in `$PATH` to communicate with QEMU.
+- [xcb](https://xcb.freedesktop.org/)
 
 
 ## Configuration
@@ -56,9 +57,9 @@ DDC/CI capable monitors and their inputs.
 control the VM and QEMU itself. This requires something similar command-line flags
 to be passed to QEMU (note libvirt may already expose some of these for you):
 
-    -chardev socket,path=/run/vfio/qga,server,nowait,id=qga0
+    -chardev socket,path=/tmp/vfio-qga,server,nowait,id=qga0
     -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0
-    -chardev socket,path=/run/vfio/qmp,server,nowait,id=qmp0
+    -chardev socket,path=/tmp/vfio-qmp,server,nowait,id=qmp0
     -mon chardev=qmp0,id=qmp,mode=control
 
 ### Input Permissions
