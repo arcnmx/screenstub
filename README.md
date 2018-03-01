@@ -42,6 +42,7 @@ this probably will need to be compiled from source.
     support.
 - [qemucomm](https://github.com/arcnmx/qemucomm/blob/master/qemucomm) must be
   installed, executable, and available in `$PATH` to communicate with QEMU.
+  - [socat](http://www.dest-unreach.org/socat/) is a dependency for qemucomm
 - [xcb](https://xcb.freedesktop.org/)
 
 
