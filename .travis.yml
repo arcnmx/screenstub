@@ -1,0 +1,55 @@
+language: rust
+rust:
+- stable
+- beta
+- nightly
+sudo: false
+os:
+- linux
+addons:
+  apt:
+    packages:
+    - libi2c-dev
+    - libusb-1.0-0-dev
+    - libudev-dev
+    - libxrandr-dev
+    - libdrm-dev
+cache:
+  directories:
+  - "$HOME/.cargo"
+  - "$HOME/ddcutil"
+  - target
+matrix:
+  fast_finish: true
+  allow_failures:
+  - rust: nightly
+env:
+  matrix:
+  - CARGO_FEATURES=
+  - CARGO_DEFAULT_FEATURES=false
+  global:
+  - CARGO_QUIET=
+before_install:
+- curl -L https://github.com/arcnmx/ci/archive/0.2.tar.gz | tar -xzC $HOME && . $HOME/ci-0.2/src
+- mkdir -p $HOME/ddcutil && curl -LfsS https://github.com/rockowitz/ddcutil/archive/v0.8.6.tar.gz | tar -xzC $HOME/ddcutil --strip-components=1
+- cd $HOME/ddcutil && ([[ -f configure ]] || (./autogen.sh && ./configure --prefix=$HOME/install)) && make -j4 && make install
+- export LIBRARY_PATH+=":$HOME/install/lib" LD_LIBRARY_PATH+=":$HOME/install/lib"
+script:
+- cd $TRAVIS_BUILD_DIR
+- cargo test
+- cargo build
+deploy:
+  provider: script
+  script: 'true'
+  on:
+    tags: true
+    all_branches: true
+    condition: "$TRAVIS_RUST_VERSION = stable"
+before_deploy:
+- cd $TRAVIS_BUILD_DIR
+- cargo doc
+after_deploy:
+- cd $TRAVIS_BUILD_DIR
+- cargo pages-publish
+- cargo package
+- cargo publish
