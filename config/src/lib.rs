@@ -4,7 +4,7 @@ extern crate serde_derive;
 extern crate serde;
 
 use std::collections::HashMap;
-use input::{Key, EventKind};
+use input::{Key, InputEvent, EventRef};
 
 pub type Config = Vec<ConfigScreen>;
 
@@ -147,6 +147,58 @@ pub enum ConfigEvent {
     Exit,
 }
 
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigInputEvent {
+    Key,
+    Button,
+    Relative,
+    Absolute,
+    Misc,
+    Switch,
+    Led,
+    Sound,
+}
+
+impl ConfigInputEvent {
+    pub fn from_event(e: &InputEvent) -> Option<Self> {
+        match EventRef::new(e) {
+            Ok(EventRef::Key(key)) if Self::key_match(key.key) => Some(ConfigInputEvent::Key),
+            Ok(EventRef::Key(key)) if Self::button_match(key.key) => Some(ConfigInputEvent::Button),
+            Ok(EventRef::Relative(..)) => Some(ConfigInputEvent::Relative),
+            Ok(EventRef::Absolute(..)) => Some(ConfigInputEvent::Absolute),
+            Ok(EventRef::Misc(..)) => Some(ConfigInputEvent::Misc),
+            Ok(EventRef::Switch(..)) => Some(ConfigInputEvent::Switch),
+            Ok(EventRef::Led(..)) => Some(ConfigInputEvent::Led),
+            Ok(EventRef::Sound(..)) => Some(ConfigInputEvent::Sound),
+            _ => None,
+        }
+    }
+
+    pub fn event_matches(&self, e: EventRef) -> bool {
+        match (*self, e) {
+            (ConfigInputEvent::Key, EventRef::Key(key)) if Self::key_match(key.key) => true,
+            (ConfigInputEvent::Button, EventRef::Key(key)) if Self::button_match(key.key) => true,
+            (ConfigInputEvent::Relative, EventRef::Relative(..)) => true,
+            (ConfigInputEvent::Absolute, EventRef::Absolute(..)) => true,
+            (ConfigInputEvent::Misc, EventRef::Misc(..)) => true,
+            (ConfigInputEvent::Switch, EventRef::Switch(..)) => true,
+            (ConfigInputEvent::Led, EventRef::Led(..)) => true,
+            (ConfigInputEvent::Sound, EventRef::Sound(..)) => true,
+            _ => false,
+        }
+    }
+
+    fn key_match(key: Key) -> bool {
+        !Self::button_match(key)
+    }
+
+    fn button_match(key: Key) -> bool {
+        let key = key as u16;
+        (key >= Key::Button0 as _) && (key < Key::KeyOk as _)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ConfigGrab {
@@ -160,9 +212,9 @@ pub enum ConfigGrab {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         new_device_name: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        xcore_ignore: Vec<EventKind>,
+        xcore_ignore: Vec<ConfigInputEvent>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        evdev_ignore: Vec<EventKind>,
+        evdev_ignore: Vec<ConfigInputEvent>,
         devices: Vec<String>,
     },
 }
