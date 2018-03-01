@@ -62,7 +62,7 @@ impl<S: Sink> Sink for Fuse<S> {
         if let Some(ref mut inner) = self.inner {
             inner.close()
         } else {
-            unimplemented!()
+            Ok(Async::Ready(()))
         }
     }
 }
