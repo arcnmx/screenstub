@@ -53,7 +53,7 @@
     events:
     - toggle_grab: xcore
     - toggle_grab:
-        evdev:
+        evdev: # evdev grab is useful for playing games that don't work with absolute mouse events
           exclusive: false # grab exclusive access from the device(s)
           #new_device_name: "unique-grab-name" # create a new uinput device for this grab
           xcore_ignore: [absolute, button] # which events to ignore from the window (key, button, absolute)

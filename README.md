@@ -1,8 +1,8 @@
 # screenstub
 
-An alternative approach to a software KVM for VFIO passthrough that aims to work
-much like [LookingGlass](https://github.com/gnif/LookingGlass) but without
-relaying frames.
+An alternative approach to a software KVM switch for GPU passthrough that aims
+to appear much like [LookingGlass](https://github.com/gnif/LookingGlass) but
+without relaying frames.
 
 `screenstub` uses [DDC/CI](https://en.wikipedia.org/wiki/Display_Data_Channel)
 to switch monitor inputs when its window is visible and/or in focus. It is
