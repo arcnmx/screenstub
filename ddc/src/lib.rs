@@ -41,6 +41,12 @@ pub struct SearchInput {
     pub name: Option<String>,
 }
 
+impl SearchInput {
+    fn is_empty(&self) -> bool {
+        self.value.is_none() && self.name.is_none()
+    }
+}
+
 #[cfg(feature = "ddcutil")]
 impl SearchDisplay {
     pub fn matches(&self, info: &DisplayInfo) -> bool {
@@ -122,7 +128,13 @@ impl Monitor {
     }
 
     pub fn match_input(&self, search: &SearchInput) -> Option<u8> {
-        self.inputs().unwrap_or(&Default::default()).iter().find(|&(&other_v, other_name)| {
+        let def = Default::default();
+        let inputs = if search.is_empty() {
+            self.other_inputs()
+        } else {
+            self.inputs().unwrap_or(&def).iter().map(|(&v, s)| (v, &s[..])).collect()
+        };
+        inputs.iter().find(|&&(other_v, other_name)| {
             if let Some(v) = search.value {
                 if other_v != v {
                     return false
@@ -136,7 +148,7 @@ impl Monitor {
             }
 
             true
-        }).map(|(&v, _)| v)
+        }).map(|&(v, _)| v)
     }
 
     pub fn from_display_info(info: DisplayInfo, search: Option<&mut SearchDisplay>) -> Result<Self, Error> {

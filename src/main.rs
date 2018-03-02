@@ -83,6 +83,19 @@ fn main_result() -> Result<i32, Error> {
             .about("Start the KVM with a fullscreen X window")
         ).subcommand(SubCommand::with_name("detect")
             .about("Detect available DDC/CI displays and their video inputs")
+        ).subcommand(SubCommand::with_name("input")
+            .about("Change the configured monitor input")
+            .arg(Arg::with_name("confirm")
+                 .short("c")
+                 .long("confirm")
+                 .help("Check that the VM is running before switching input")
+            ).arg(Arg::with_name("input")
+                .value_name("DEST")
+                .takes_value(true)
+                .required(true)
+                .possible_values(&["host", "guest"])
+                .help("Switch to either the host or guest monitor input")
+            )
         ).setting(AppSettings::SubcommandRequiredElseHelp);
 
     let matches = app.get_matches();
@@ -322,6 +335,29 @@ fn main_result() -> Result<i32, Error> {
             });
 
             Ok(0)
+        },
+        ("input", Some(matches)) => {
+            let config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
+
+            match matches.value_of("input") {
+                Some("host") => {
+                    unimplemented!()
+                },
+                Some("guest") => {
+                    let mut ddc = Monitor::new(convert_display(config.monitor));
+                    ddc.to_display()?;
+                    if matches.is_present("confirm") {
+                        unimplemented!()
+                    }
+
+                    if let Some(input) = ddc.match_input(&convert_input(config.guest_source)) {
+                        ddc.set_input(input).map(|_| 0)
+                    } else {
+                        Err(format_err!("DDC guest input source not found"))
+                    }
+                },
+                _ => unreachable!("unknown input to switch to"),
+            }
         },
         _ => unreachable!("unknown command"),
     }
