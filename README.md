@@ -17,7 +17,8 @@ something like Synergy.
 2. Install screenstub via [cargo](#installation).
 3. Run `screenstub detect` to check that DDC/CI is working and your monitor
    is detected. You may need to enable DDC/CI in your monitor's settings, or
-   [adjust settings if you have an NVIDIA card on the host](#nvidia).
+   [adjust settings if you have an NVIDIA card on the host](#nvidia), or [load
+   the i2c drivers](#host-control).
 4. Install and set up [qemu-ga to run on Windows startup](#qemu-guest-agent).
 5. Install a [command-line DDC/CI program in Windows](#windows).
 6. [Configure](#configuration) screenstub by modifying the example as necessary,
@@ -91,7 +92,9 @@ use the virtual input devices for the host.
 ### Host Control
 
 These are pretty straightforward to use when they work, however it is recommended
-to use `libddcutil` directly instead.
+to use `libddcutil` directly instead. You will probably need to load the `i2c-dev`
+kernel module for these to work, by placing [i2c.conf](samples/modules-load.d/i2c.conf)
+in `/etc/modules-load.d/`.
 
 - [ddcutil](http://www.ddcutil.com/)
 - [ddccontrol](https://github.com/ddccontrol/ddccontrol)
