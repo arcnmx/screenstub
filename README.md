@@ -31,7 +31,7 @@ something like Synergy.
 Requires a modern stable [Rust toolchain](https://www.rust-lang.org/en-US/install.html)
 to be installed, and can be installed and run like so:
 
-    cargo install --git https://github.com/arcnmx/screenstub
+    cargo install --force --git https://github.com/arcnmx/screenstub
     screenstub -c config.yml x
 
 ### Dependencies
