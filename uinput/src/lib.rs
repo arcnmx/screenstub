@@ -72,7 +72,7 @@ impl Builder {
     pub fn x_config_rel(&mut self) -> &mut Self {
         self.x_config_();
         self.bits_events.set(EventKind::Relative);
-        for &axis in &[RelativeAxis::X, RelativeAxis::Y] {
+        for &axis in &[RelativeAxis::X, RelativeAxis::Y, RelativeAxis::Wheel, RelativeAxis::HorizontalWheel] {
             self.bits_rel.set(axis);
         }
 
