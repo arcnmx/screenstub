@@ -104,8 +104,8 @@ impl<U> Events<U> {
             xcb::BUTTON_INDEX_1 => Some(Key::ButtonLeft),
             xcb::BUTTON_INDEX_2 => Some(Key::ButtonMiddle),
             xcb::BUTTON_INDEX_3 => Some(Key::ButtonRight),
-            xcb::BUTTON_INDEX_4 => Some(Key::ButtonWheel), // Key::ButtonGearDown
-            xcb::BUTTON_INDEX_5 => Some(Key::ButtonGearUp),
+            xcb::BUTTON_INDEX_4 => Some(Key::ButtonGearUp),
+            xcb::BUTTON_INDEX_5 => Some(Key::ButtonWheel), // Key::ButtonGearDown
             // also map Key::ButtonSide, Key::ButtonExtra? qemu input-linux doesn't support fwd/back, but virtio probably does
             _ => None,
         }
