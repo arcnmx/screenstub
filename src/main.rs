@@ -336,6 +336,7 @@ fn main_result() -> Result<i32, Error> {
 
             Ok(0)
         },
+        #[cfg(feature = "with-ddcutil")]
         ("input", Some(matches)) => {
             let config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
 
