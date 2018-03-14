@@ -1,0 +1,11 @@
+[package]
+name = "screenstub-qemu"
+version = "0.0.1"
+
+[dependencies]
+futures = "^0.1.18"
+failure = "^0.1.1"
+log = "^0.4.1"
+tokio-core = "^0.1.12"
+tokio-uds = "^0.1.7"
+tokio-qapi = { version = "^0.0.2", features = ["qmp", "qga"] }

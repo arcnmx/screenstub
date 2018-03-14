@@ -5,7 +5,7 @@ version = "0.0.1"
 [dependencies]
 serde = "^1.0.27"
 serde_derive = "^1.0.27"
-input-linux = { git = "https://github.com/arcnmx/input-linux-rs.git", features = ["with-serde"] }
+input-linux = { version = "^0.0.1", features = ["with-serde"] }
 
 [features]
 with-ddcutil = []

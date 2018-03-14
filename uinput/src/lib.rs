@@ -92,6 +92,10 @@ impl Builder {
                 },
             });
         }
+        self.bits_events.set(EventKind::Relative);
+        for &axis in &[RelativeAxis::Wheel, RelativeAxis::HorizontalWheel] {
+            self.bits_rel.set(axis);
+        }
 
         self
     }

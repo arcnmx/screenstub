@@ -76,44 +76,64 @@ pub struct ConfigDdc {
     pub guest: ConfigDdcGuest,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConfigQemu {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ga_socket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qmp_socket: Option<String>,
+
     #[serde(default)]
-    pub comm: ConfigQemuComm,
-    #[serde(default)]
-    pub driver: ConfigQemuDriver,
+    pub driver: Option<ConfigQemuDriver>,
+    #[serde(default = "ConfigQemuDriver::ps2")]
+    pub keyboard_driver: ConfigQemuDriver,
+    #[serde(default = "ConfigQemuDriver::usb")]
+    pub relative_driver: ConfigQemuDriver,
+    #[serde(default = "ConfigQemuDriver::usb")]
+    pub absolute_driver: ConfigQemuDriver,
+
+    #[serde(default = "ConfigQemuRouting::qmp")]
+    pub routing: ConfigQemuRouting,
+}
+
+impl Default for ConfigQemu {
+    fn default() -> Self {
+        ConfigQemu {
+            ga_socket: Default::default(),
+            qmp_socket: Default::default(),
+            driver: Default::default(),
+            keyboard_driver: ConfigQemuDriver::Ps2,
+            relative_driver: ConfigQemuDriver::Usb,
+            absolute_driver: ConfigQemuDriver::Usb,
+            routing: ConfigQemuRouting::Qmp,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigQemuComm {
-    None,
-    Qemucomm,
-    QMP,
-    Console,
+#[serde(rename_all = "lowercase")]
+pub enum ConfigQemuDriver {
+    Ps2,
+    Usb,
+    Virtio,
 }
 
-impl Default for ConfigQemuComm {
-    fn default() -> Self {
-        ConfigQemuComm::Qemucomm
-    }
+impl ConfigQemuDriver {
+    fn ps2() -> Self { ConfigQemuDriver::Ps2 }
+    fn usb() -> Self { ConfigQemuDriver::Usb }
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ConfigQemuDriver {
+pub enum ConfigQemuRouting {
     InputLinux,
-    Virtio,
+    VirtioHost,
+    //Spice,
+    Qmp,
 }
 
-impl Default for ConfigQemuDriver {
-    fn default() -> Self {
-        ConfigQemuDriver::InputLinux
-    }
+impl ConfigQemuRouting {
+    fn qmp() -> Self { ConfigQemuRouting::Qmp }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -163,8 +183,8 @@ pub enum ConfigInputEvent {
 impl ConfigInputEvent {
     pub fn from_event(e: &InputEvent) -> Option<Self> {
         match EventRef::new(e) {
-            Ok(EventRef::Key(key)) if Self::key_match(key.key) => Some(ConfigInputEvent::Key),
-            Ok(EventRef::Key(key)) if Self::button_match(key.key) => Some(ConfigInputEvent::Button),
+            Ok(EventRef::Key(key)) if key.key.is_key() => Some(ConfigInputEvent::Key),
+            Ok(EventRef::Key(key)) if key.key.is_button() => Some(ConfigInputEvent::Button),
             Ok(EventRef::Relative(..)) => Some(ConfigInputEvent::Relative),
             Ok(EventRef::Absolute(..)) => Some(ConfigInputEvent::Absolute),
             Ok(EventRef::Misc(..)) => Some(ConfigInputEvent::Misc),
@@ -177,8 +197,8 @@ impl ConfigInputEvent {
 
     pub fn event_matches(&self, e: EventRef) -> bool {
         match (*self, e) {
-            (ConfigInputEvent::Key, EventRef::Key(key)) if Self::key_match(key.key) => true,
-            (ConfigInputEvent::Button, EventRef::Key(key)) if Self::button_match(key.key) => true,
+            (ConfigInputEvent::Key, EventRef::Key(key)) if key.key.is_key() => true,
+            (ConfigInputEvent::Button, EventRef::Key(key)) if key.key.is_button() => true,
             (ConfigInputEvent::Relative, EventRef::Relative(..)) => true,
             (ConfigInputEvent::Absolute, EventRef::Absolute(..)) => true,
             (ConfigInputEvent::Misc, EventRef::Misc(..)) => true,
@@ -187,15 +207,6 @@ impl ConfigInputEvent {
             (ConfigInputEvent::Sound, EventRef::Sound(..)) => true,
             _ => false,
         }
-    }
-
-    fn key_match(key: Key) -> bool {
-        !Self::button_match(key)
-    }
-
-    fn button_match(key: Key) -> bool {
-        let key = key as u16;
-        (key >= Key::Button0 as _) && (key < Key::KeyOk as _)
     }
 }
 

@@ -3,6 +3,6 @@ name = "screenstub-event"
 version = "0.0.1"
 
 [dependencies]
-input-linux = { git = "https://github.com/arcnmx/input-linux-rs.git" }
+input-linux = "^0.0.1"
 screenstub-x = { path = "../x" }
 log = "^0.4.1"

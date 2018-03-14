@@ -9,21 +9,23 @@ tokio-fd = { path = "tokio-fd" }
 screenstub-config = { path = "config" }
 screenstub-uinput = { path = "uinput" }
 screenstub-event = { path = "event" }
+screenstub-qemu = { path = "qemu" }
 screenstub-ddc = { path = "ddc" }
-screenstub-qmp = { path = "qmp" }
 screenstub-x = { path = "x" }
-input-linux = { git = "https://github.com/arcnmx/input-linux-rs.git" }
+input-linux = { version = "^0.0.1" }
 tokio-core = "^0.1.12"
 tokio-process = "^0.1.5"
 tokio-timer = "^0.1.2"
 failure = "^0.1.1"
 futures = "^0.1.18"
 futures-cpupool = "^0.1.8"
+futures-stream-select-all = "^0.1.2"
 clap = "^2.30.0"
 env_logger = "^0.5.4"
 log = "^0.4.1"
 serde_yaml = "^0.7.3"
 result = "^1.0.0"
+tokio-qapi = { version = "^0.0.2", features = ["qmp", "qga"] }
 
 [features]
 with-ddcutil = ["screenstub-ddc/with-ddcutil", "screenstub-config/with-ddcutil"]

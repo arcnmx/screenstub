@@ -7,7 +7,7 @@
       guest_exec: ["C:/ScreenBright.exe", "-set", "0x60", "{}"] # "{}" is for decimal values
       #guest_exec: ["C:/ddcset.exe", "0x60", "0x{:x}"] # or use "{:x}" for prefixless hex
       #exec: ["ssh", "user@vm", "ddcutil", "setvcp", "0x60", "{}"] # system commands can also be used
-  monitor:
+  monitor: # fill in with info from `screenstub detect`
     manufacturer: GSM
     model: LG Ultra HD
     #serial: "..."
@@ -18,11 +18,16 @@
     #name: HDMI-1
     #value: 0x11
   qemu:
-    driver: input-linux
-    #driver: virtio # Requires vioinput drivers installed in guest
-    comm: qemucomm # https://github.com/arcnmx/qemucomm/blob/master/qemucomm must be in $PATH
-    #comm: qmp # QMP socket type "mode=control" # CURRENTLY UNIMPLEMENTED
-    #comm: console # QMP socket type "mode=readline" # CURRENTLY UNIMPLEMENTED
+    #routing: qmp # (default) qmp is slow but does not require uinput or dependencies
+    #routing: spice # does not require uinput # CURRENTLY UNIMPLEMENTED
+    #routing: input-linux # requires uinput
+    #routing: virtio-host # requires uinput, recommended for performance, requires vioinput drivers in guest
+    #driver: ps2 # Use PS/2 in the guest
+    #driver: usb # Use USB mouse/tablet in the guest
+    #driver: virtio # Recommended but vioinput drivers must be installed in guest
+    #keyboard_driver: virtio # can also be set separately per input type, this should rarely be necessary
+    #relative_driver: virtio
+    #absolute_driver: virtio
     qmp_socket: /tmp/vfio-qmp # path to QMP socket
     ga_socket: /tmp/vfio-qga # path to Guest Agent socket
   key_remap: # Arbitrary keys can be remapped in the guest

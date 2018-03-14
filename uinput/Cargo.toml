@@ -3,7 +3,7 @@ name = "screenstub-uinput"
 version = "0.0.1"
 
 [dependencies]
-input-linux = { git = "https://github.com/arcnmx/input-linux-rs.git", features = ["with-tokio"] }
+input-linux = { version = "^0.0.1", features = ["with-tokio"] }
 tokio-fd = { path = "../tokio-fd" }
 tokio-io = "^0.1.5"
 tokio-core = "^0.1.12"

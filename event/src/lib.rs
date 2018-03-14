@@ -123,12 +123,12 @@ impl<U> Events<U> {
     }
 
     pub fn map_input_event(&mut self, mut e: InputEvent) -> InputEvent {
-        let key = match EventMut::new(&mut e) {
+        match EventMut::new(&mut e) {
             Ok(EventMut::Key(key)) => if let Some(remap) = self.remap.get(&key.key) {
                 key.key = *remap;
             },
             _ => (),
-        };
+        }
 
         e
     }
