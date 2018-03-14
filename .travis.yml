@@ -47,7 +47,7 @@ deploy:
   on:
     tags: true
     all_branches: true
-    condition: "$TRAVIS_RUST_VERSION = stable"
+    condition: "$TRAVIS_RUST_VERSION = stable && $CARGO_DEFAULT_FEATURES != false"
 before_deploy:
 - cd $TRAVIS_BUILD_DIR
 - cargo doc
