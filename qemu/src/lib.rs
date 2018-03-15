@@ -73,6 +73,19 @@ impl Qemu {
         ConnectFuture::new(self.connect_qga_(handle))
     }
 
+    pub fn connect_qmp_events(&self, handle: &Handle) -> Box<Future<Item=(QapiStream<QemuStream>, QapiEventStream<QemuStream>), Error=Error>> {
+        Box::new(future::result(
+                self.socket_qmp.as_ref().ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "QMP socket not configured"))
+                .and_then(|socket| UnixStream::connect(socket, handle))
+                .map_err(Error::from)
+            ).map(qapi::event_stream)
+            .and_then(|(s, e)|
+                qapi::qmp_handshake(s).map(|(_, s)| (s, e))
+                .map_err(Error::from)
+            )
+        ) as Box<_>
+    }
+
     pub fn connect_qmp(&self, handle: &Handle) -> QmpFuture {
         QmpConnectResult::new(ConnectFuture::new(self.connect_qmp_(handle)))
     }
@@ -216,6 +229,14 @@ impl<F, S, C: Command> CommandFuture<F, S, C> {
         CommandFuture::Stream {
             future: f,
             command: c,
+        }
+    }
+}
+
+impl<S, C: Command> CommandFuture<future::FutureResult<QapiStream<S>, Error>, S, C> {
+    pub fn execute(stream: QapiStream<S>, command: C) -> Self {
+        CommandFuture::Command {
+            future: stream.execute(command),
         }
     }
 }

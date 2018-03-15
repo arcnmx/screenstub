@@ -6,6 +6,7 @@ use tokio_core::reactor::Handle;
 use futures::unsync::mpsc as un_mpsc;
 use futures::{future, Future, Stream, Sink};
 use failure::Error;
+use config::ConfigQemuRouting;
 use qapi::{qmp, Any, Command};
 use qemu::{Qemu, CommandFuture};
 use uinput;
@@ -171,6 +172,43 @@ impl<C: Command + 'static, CD: Command + 'static> RouteUInput<Fn(PathBuf) -> (St
                     .then(move |e| qemu.execute_qmp(&handle, delete(id)).map(drop).then(|r| e.and_then(|_| r)))
             }).or_else(|e| error_sender.send(e).map(drop).map_err(drop))
         );
+    }
+}
+
+pub enum Route {
+    InputLinux(RouteUInput<Fn(PathBuf) -> (String, qmp::object_add), Fn(String) -> qmp::object_del>),
+    VirtioHost(RouteUInput<Fn(PathBuf) -> (String, qmp::device_add), Fn(String) -> qmp::device_del>),
+    Qmp(RouteQmp),
+    //Spice(RouteInputSpice),
+}
+
+impl Route {
+    pub fn new(routing: ConfigQemuRouting, qemu: Rc<Qemu>, id: String, bus: Option<String>, repeat: bool) -> Self {
+        match routing {
+            ConfigQemuRouting::InputLinux => Route::InputLinux(RouteUInput::new_input_linux(qemu, id, repeat)),
+            ConfigQemuRouting::VirtioHost => Route::VirtioHost(RouteUInput::new_virtio_host(qemu, id, bus)),
+            ConfigQemuRouting::Qmp => Route::Qmp(RouteQmp::new(qemu)),
+        }
+    }
+
+    pub fn builder(&mut self) -> Option<&mut uinput::Builder> {
+        match *self {
+            Route::InputLinux(ref mut uinput) => Some(uinput.builder()),
+            Route::VirtioHost(ref mut uinput) => Some(uinput.builder()),
+            Route::Qmp(..) => None,
+        }
+    }
+
+    pub fn spawn(self, handle: &Handle, error_sender: un_mpsc::Sender<Error>) -> un_mpsc::Sender<InputEvent> {
+        let (sender, events) = un_mpsc::channel(::EVENT_BUFFER);
+
+        match self {
+            Route::InputLinux(ref uinput) => uinput.spawn(handle, events, error_sender),
+            Route::VirtioHost(ref uinput) => uinput.spawn(handle, events, error_sender),
+            Route::Qmp(ref qmp) => qmp.spawn(handle, events, error_sender),
+        }
+
+        sender
     }
 }
 

@@ -31,7 +31,7 @@
     qmp_socket: /tmp/vfio-qmp # path to QMP socket
     ga_socket: /tmp/vfio-qga # path to Guest Agent socket
   key_remap: # Arbitrary keys can be remapped in the guest
-    # See https://github.com/arcnmx/input-linux-rs/blob/master/src/keys.rs for a list of key names available (mouse buttons can also be used)
+    # See https://arcnmx.github.io/input-linux-rs/input_linux/enum.Key.html for a list of key names available (mouse buttons can also be used)
     KeyLeftMeta: KeyReserved # disable the windows key
     KeyRightAlt: KeyLeftMeta # remap right alt to trigger the windows key
   hotkeys: # Trigger various events on key combinations

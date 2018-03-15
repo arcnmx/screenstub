@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 use std::rc::Rc;
 use tokio_core::reactor::Handle;
-use futures::{future, Future, IntoFuture};
+use futures::{future, Stream, Future, IntoFuture};
 use futures::unsync::mpsc as un_mpsc;
 use failure::Error;
 use config::{ConfigEvent, ConfigGrab, ConfigGrabMode, ConfigInputEvent, ConfigQemuRouting, ConfigQemuDriver};
 use qapi::qga::{guest_shutdown, GuestShutdownMode};
-use qapi::qmp::{device_add, device_del, qom_list};
-use qapi;
+use qapi::qmp::{self, device_add, device_del, qom_list};
+use qapi::{self, QapiStream, QapiEventStream};
 use input::{self, InputEvent, RelativeAxis, InputId};
-use qemu::Qemu;
+use qemu::{Qemu, QemuStream, CommandFuture};
 use filter::InputEventFilter;
 use inputs::Inputs;
 use route::{RouteUInput, RouteQmp};
@@ -20,7 +20,7 @@ use x::XRequest;
 use ::EVENT_BUFFER;
 
 pub struct GrabHandle {
-    grab: Grab,
+    _grab: Grab,
     x_filter: Vec<ConfigInputEvent>,
     is_mouse: bool,
 }
@@ -70,10 +70,22 @@ impl Process {
         }
     }
 
-    fn add_device(&self, device: InputDevice, driver: ConfigQemuDriver) -> Box<Future<Item=(), Error=Error>> {
+    pub fn x_filter(&self) -> Rc<RefCell<InputEventFilter>> {
+        self.x_input_filter.clone()
+    }
+
+    fn device_id(device: InputDevice) -> &'static str {
+        match device {
+            InputDevice::Keyboard => "screenstub-dev-kbd",
+            InputDevice::Relative => "screenstub-dev-mouse",
+            InputDevice::Absolute => "screenstub-dev-mouse",
+        }
+    }
+
+    fn add_device_cmd(device: InputDevice, driver: ConfigQemuDriver) -> Option<device_add> {
         let driver = match (device, driver) {
-            (InputDevice::Absolute, ConfigQemuDriver::Ps2) => return Box::new(future::err(format_err!("PS/2 tablet not possible"))) as Box<_>,
-            (_, ConfigQemuDriver::Ps2) => return Box::new(future::ok(())) as Box<_>,
+            (InputDevice::Absolute, ConfigQemuDriver::Ps2) => panic!("PS/2 tablet not possible"),
+            (_, ConfigQemuDriver::Ps2) => return None,
             (InputDevice::Keyboard, ConfigQemuDriver::Usb) => "usb-kbd",
             (InputDevice::Relative, ConfigQemuDriver::Usb) => "usb-mouse",
             (InputDevice::Absolute, ConfigQemuDriver::Usb) => "usb-tablet",
@@ -83,36 +95,74 @@ impl Process {
         };
 
         let id = Self::device_id(device);
-        Box::new(self.qemu.execute_qmp(&self.handle, device_add::new(driver.into(), Some(id.into()), None, Vec::new()))
-            .map(drop)) as Box<_>
+        Some(device_add::new(driver.into(), Some(id.into()), None, Vec::new()))
     }
 
-    fn del_device(&self, device: InputDevice) -> Box<Future<Item=(), Error=Error>> {
-        let id = Self::device_id(device);
-
-        Box::new(self.qemu.execute_qmp(&self.handle, device_del { id: id.into() })
-            .map(drop)) as Box<_>
-    }
-
-    fn device_exists(&self, id: &str) -> Box<Future<Item=bool, Error=Error>> {
+    fn device_exists_cmd(id: &str) -> qom_list {
         let path = format!("/machine/peripheral/{}", id);
-        Box::new(self.qemu.execute_qmp(&self.handle, qom_list { path: path }).map(|_| true)
-            .or_else(|e| match e.downcast::<qapi::Error>() {
-                Ok(e) => if let qapi::ErrorClass::DeviceNotFound = e.class { Ok(false) } else { Err(e.into()) },
-                Err(e) => Err(e),
-            })) as Box<_>
+        qom_list { path: path }
     }
 
-    fn device_id(device: InputDevice) -> &'static str {
-        match device {
-            InputDevice::Keyboard => "screenstub-kbd",
-            InputDevice::Relative => "screenstub-rel",
-            InputDevice::Absolute => "screenstub-abs",
-        }
+    fn device_exists_map(e: Result<Vec<qmp::ObjectPropertyInfo>, qapi::Error>) -> Result<bool, Error> {
+        e.map(|_| true).or_else(|e| if let qapi::ErrorClass::DeviceNotFound = e.class { Ok(false) } else { Err(e.into()) })
     }
 
-    fn set_is_mouse(&self, is_mouse: bool) -> Box<Future<Item=(), Error=Error>> {
-        unimplemented!()
+    fn devices_init_cmd(qmp: QapiStream<QemuStream>, events: QapiEventStream<QemuStream>, routing: ConfigQemuRouting, device: InputDevice, driver: ConfigQemuDriver) -> Box<Future<Item=QapiStream<QemuStream>, Error=Error>> {
+        match routing {
+            ConfigQemuRouting::VirtioHost => return Box::new(future::ok(qmp)) as Box<_>,
+            _ => (),
+        };
+
+        let id = Self::device_id(device);
+        Box::new(qmp.execute(Self::device_exists_cmd(id)).map_err(Error::from)
+            .and_then(|(r, qmp)| Self::device_exists_map(r).map(|e| (e, qmp)))
+            .and_then(move |(e, qmp)| if e {
+                future::Either::A(
+                    CommandFuture::execute(qmp, device_del { id: id.into() }).map(|(_, qmp)| qmp)
+                    .join(events.map_err(Error::from).filter(move |e| match *e {
+                        qmp::Event::DEVICE_DELETED { ref data, .. } => data.device.as_ref().map(|s| &s[..]) == Some(id),
+                        _ => false,
+                    }).into_future().map_err(|(e, _)| e).and_then(|(v, _)| if v.is_some() {
+                        Ok(())
+                    } else {
+                        Err(format_err!("Expected DEVICE_DELETED event"))
+                    })).map(|(qmp, _)| qmp)
+                )
+            } else {
+                future::Either::B(future::ok(qmp))
+            }).and_then(move |qmp| if let Some(c) = Self::add_device_cmd(device, driver) {
+                future::Either::A(CommandFuture::execute(qmp, c).map(|(_, qmp)| qmp))
+            } else {
+                future::Either::B(future::ok(qmp))
+            })
+        ) as Box<_>
+    }
+
+    pub fn devices_init(&self) -> Box<Future<Item=(), Error=Error>> {
+        let routing = self.routing;
+        let driver_keyboard = self.driver_keyboard;
+
+        Box::new(self.qemu.connect_qmp_events(&self.handle).map_err(Error::from)
+            .and_then(move |(qmp, events)| Self::devices_init_cmd(qmp, events, routing, InputDevice::Keyboard, driver_keyboard))
+            .map(drop)
+        ) as Box<_>
+    }
+
+    fn set_is_mouse_cmd(qemu: &Qemu, handle: &Handle, routing: ConfigQemuRouting, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, is_mouse: bool) -> Box<Future<Item=(), Error=Error>> {
+        let (device, driver) = if is_mouse {
+            (InputDevice::Relative, driver_relative)
+        } else {
+            (InputDevice::Absolute, driver_absolute)
+        };
+
+        Box::new(qemu.connect_qmp_events(handle).map_err(Error::from)
+            .and_then(move |(qmp, events)| Self::devices_init_cmd(qmp, events, routing, device, driver))
+            .map(drop)
+        ) as Box<_>
+    }
+
+    pub fn set_is_mouse(&self, is_mouse: bool) -> Box<Future<Item=(), Error=Error>> {
+        Self::set_is_mouse_cmd(&self.qemu, &self.handle, self.routing, self.driver_relative, self.driver_absolute, is_mouse)
     }
 
     fn grab(&self, grab: &ConfigGrab) -> ProcessedUserEvent {
@@ -121,7 +171,7 @@ impl Process {
         match *grab {
             ConfigGrab::XCore => {
                 self.grabs.borrow_mut().insert(mode, GrabHandle {
-                    grab: Grab::XCore,
+                    _grab: Grab::XCore,
                     x_filter: Default::default(),
                     is_mouse: false,
                 });
@@ -151,6 +201,7 @@ impl Process {
                                 let id = format!("screenstub-uinput-{}", devname);
                                 let repeat = false;
                                 let bus = None;
+                                let qemu = qemu.clone();
                                 let mut uinput = match routing {
                                     ConfigQemuRouting::InputLinux => Trio::A(RouteUInput::new_input_linux(qemu, id, repeat)),
                                     ConfigQemuRouting::VirtioHost => Trio::B(RouteUInput::new_virtio_host(qemu, id, bus)),
@@ -172,10 +223,10 @@ impl Process {
                                     if let Some(builder) = builder.as_mut() {
                                         builder.from_evdev(&evdev)?;
                                     }
+                                }
 
-                                    if exclusive {
-                                        evdev.grab(true)?;
-                                    }
+                                if exclusive {
+                                    grab.grab(true)?;
                                 }
 
                                 let (send, recv) = un_mpsc::channel(EVENT_BUFFER);
@@ -205,19 +256,28 @@ impl Process {
                             x_filter.borrow_mut().set_filter(xcore_ignore.iter().cloned());
 
                             grabs.borrow_mut().insert(mode, GrabHandle {
-                                grab: grab.into(),
+                                _grab: grab.into(),
                                 x_filter: xcore_ignore,
                                 is_mouse: is_mouse,
                             });
 
-                            // TODO: qemu.set_is_mouse!!
-
-                            Ok(())
+                            Ok((qemu, handle, routing, is_mouse))
                         }
+                    }).and_then({
+                        let driver_relative = self.driver_relative;
+                        let driver_absolute = self.driver_absolute;
+
+                        move |(qemu, handle, routing, is_mouse)|
+                        Self::set_is_mouse_cmd(&qemu, &handle, routing, driver_relative, driver_absolute, is_mouse)
                     }).into()
             },
             _ => future::err(format_err!("grab {:?} unimplemented", mode)).into(),
         }
+    }
+
+    pub fn is_mouse(&self) -> bool {
+        // TODO: no grabs doesn't necessarily mean absolute mode...
+        self.grabs.borrow().iter().map(|(_, g)| g.is_mouse).next().unwrap_or(false)
     }
 
     fn ungrab(&self, grab: ConfigGrabMode) -> ProcessedUserEvent {

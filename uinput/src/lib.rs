@@ -70,7 +70,7 @@ impl Builder {
     }
 
     pub fn x_config_rel(&mut self) -> &mut Self {
-        self.x_config_();
+        self.x_config_button();
         self.bits_events.set(EventKind::Relative);
         for &axis in &[RelativeAxis::X, RelativeAxis::Y, RelativeAxis::Wheel, RelativeAxis::HorizontalWheel] {
             self.bits_rel.set(axis);
@@ -80,7 +80,7 @@ impl Builder {
     }
 
     pub fn x_config_abs(&mut self) -> &mut Self {
-        self.x_config_();
+        self.x_config_button();
         self.bits_events.set(EventKind::Absolute);
         for &axis in &[AbsoluteAxis::X, AbsoluteAxis::Y] {
             self.absolute_axis(AbsoluteInfoSetup {
@@ -100,11 +100,22 @@ impl Builder {
         self
     }
 
-    fn x_config_(&mut self) {
+    pub fn x_config_button(&mut self) -> &mut Self {
         self.bits_events.set(EventKind::Key);
-        // autorepeat is undesired, the VM will have its own implementation
-        //self.bits_events.set(EventKind::Autorepeat); // kernel should handle this for us as long as it's set
-        self.bits_keys.or(Key::iter());
+        self.bits_keys.or(Key::iter().filter(|k| k.is_button()));
+
+        self
+    }
+
+    pub fn x_config_key(&mut self, repeat: bool) -> &mut Self {
+        self.bits_events.set(EventKind::Key);
+        if repeat {
+            // autorepeat is undesired, the VM will have its own implementation
+            self.bits_events.set(EventKind::Autorepeat); // kernel should handle this for us as long as it's set
+        }
+        self.bits_keys.or(Key::iter().filter(|k| k.is_key()));
+
+        self
     }
 
     pub fn from_evdev(&mut self, evdev: &EvdevHandle) -> io::Result<&mut Self> {
