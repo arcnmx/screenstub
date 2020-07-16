@@ -1,11 +1,6 @@
-#[macro_use]
-extern crate log;
-extern crate env_logger;
-extern crate futures;
-extern crate futures_cpupool;
-extern crate futures_stream_select_all;
-#[macro_use]
-extern crate failure;
+#![recursion_limit = "1024"]
+
+extern crate tokio_qapi as qapi;
 extern crate input_linux as input;
 extern crate screenstub_uinput as uinput;
 extern crate screenstub_config as config;
@@ -13,40 +8,28 @@ extern crate screenstub_event as event;
 extern crate screenstub_qemu as qemu;
 extern crate screenstub_ddc as ddc;
 extern crate screenstub_x as x;
-extern crate tokio_unzip;
-extern crate tokio_timer;
-extern crate tokio_fuse;
-extern crate tokio_core;
-extern crate tokio_process;
-extern crate serde_yaml;
-extern crate tokio_qapi as qapi;
-extern crate result;
-extern crate clap;
 
 use std::process::exit;
-use std::thread::spawn;
-use std::cell::RefCell;
-use std::time::Duration;
-use std::rc::Rc;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::io::{self, Write};
-use tokio_core::reactor::Core;
-use tokio_unzip::StreamUnzipExt;
-use tokio_timer::Timer;
-use futures::sync::mpsc;
-use futures::unsync::mpsc as un_mpsc;
-use futures::{Future, Stream, Sink, stream, future};
-use futures::future::Either;
-use failure::Error;
+use futures::channel::{mpsc, oneshot};
+use futures::channel::mpsc as un_mpsc;
+use futures::{stream, future, TryFutureExt, FutureExt, StreamExt, SinkExt};
+use futures::stream::FusedStream;
+use futures::lock::Mutex;
+use failure::{Error, format_err};
+use log::{warn, error, trace};
 use clap::{Arg, App, SubCommand, AppSettings};
-use input::{InputId, Key, RelativeAxis, AbsoluteAxis, EventKind};
+use input::{InputId, Key, RelativeAxis, AbsoluteAxis, InputEvent, EventKind};
 use config::{Config, ConfigEvent};
 use event::{Hotkey, UserEvent, ProcessedXEvent};
 use qemu::Qemu;
 use route::Route;
 use inputs::Inputs;
-use process::{Process, ProcessedUserEvent};
+use process::Process;
 #[cfg(feature = "with-ddcutil")]
-use ddc::Monitor;
+use ddc::ddcutil::Monitor;
 use x::XRequest;
 
 mod route;
@@ -58,8 +41,9 @@ mod process;
 
 const EVENT_BUFFER: usize = 8;
 
-fn main() {
-    match main_result() {
+#[tokio::main]
+async fn main() {
+    match main_result().await {
         Ok(code) => exit(code),
         Err(e) => {
             let _ = writeln!(io::stderr(), "{:?} {}", e, e);
@@ -68,7 +52,7 @@ fn main() {
     }
 }
 
-fn main_result() -> Result<i32, Error> {
+async fn main_result() -> Result<i32, Error> {
     env_logger::init();
 
     let app = App::new("screenstub")
@@ -104,7 +88,7 @@ fn main_result() -> Result<i32, Error> {
     let config = if let Some(config) = matches.value_of("config") {
         use std::fs::File;
 
-        let mut f = File::open(config)?;
+        let f = File::open(config)?;
         serde_yaml::from_reader(f)?
     } else {
         Config::default()
@@ -114,37 +98,52 @@ fn main_result() -> Result<i32, Error> {
         ("x", Some(..)) => {
             let mut config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
 
-            let (mut x_sender, x_receiver) = mpsc::channel(0x20);
-            let (xreq_sender, xreq_receiver) = mpsc::channel(0x08);
-            let xthread = spawn(move || {
-                if let Err(res) = x::XContext::xmain(xreq_receiver, &mut x_sender) {
-                    x::XContext::spin_send(&mut x_sender, Err(res))
-                } else {
-                    Ok(())
+            let (mut x_sender, mut x_receiver) = mpsc::channel(0x20);
+            let (mut xreq_sender, mut xreq_receiver) = mpsc::channel(0x08);
+            let x = x::XContext::xmain()?;
+            let xmain = tokio::spawn(async move {
+                let mut x = x.fuse();
+                loop {
+                    futures::select! {
+                        req = xreq_receiver.next() => if let Some(req) = req {
+                            let _ = x.send(req).await;
+                        },
+                        event = x.next() => match event {
+                            Some(Ok(event)) => {
+                                let _ = x_sender.send(event).await;
+                            },
+                            Some(Err(e)) => {
+                                error!("X Error: {}: {:?}", e, e);
+                                break
+                            },
+                            None => {
+                                break
+                            },
+                        },
+                        complete => break,
+                    }
                 }
-            });
+            }).map_err(From::from);
 
-            let mut core = Core::new()?;
+            let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
 
-            let qemu = Rc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
+            let inputs = Inputs::new(qemu.clone(), config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
 
-            let inputs = Rc::new(Inputs::new(core.handle(), qemu.clone(), config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest));
-
-            let (event_sender, event_recv) = un_mpsc::channel(EVENT_BUFFER);
-            let (error_sender, error_recv) = un_mpsc::channel(1);
+            let (mut event_sender, mut event_recv) = un_mpsc::channel(EVENT_BUFFER);
+            let (error_sender, mut error_recv) = un_mpsc::channel(1);
 
             if let Some(driver) = config.qemu.driver {
                 config.qemu.keyboard_driver = driver.clone();
                 config.qemu.relative_driver = driver.clone();
                 config.qemu.absolute_driver = driver;
             }
-            let process = Process::new(core.handle(),
-                config.qemu.routing, config.qemu.keyboard_driver, config.qemu.relative_driver, config.qemu.absolute_driver,
-                qemu.clone(), inputs, event_sender.clone(), error_sender.clone(),
+            let process = Process::new(
+                config.qemu.routing, config.qemu.keyboard_driver, config.qemu.relative_driver, config.qemu.absolute_driver, config.exit_events,
+                qemu.clone(), inputs, xreq_sender.clone(), event_sender.clone(), error_sender.clone(),
             );
 
-            core.run(process.devices_init())?;
-            core.run(process.set_is_mouse(false))?; // TODO: config option to start up in relative mode instead
+            process.devices_init().await?;
+            process.set_is_mouse(false).await?; // TODO: config option to start up in relative mode instead
 
             let uinput_id = InputId {
                 bustype: input::sys::BUS_VIRTUAL,
@@ -162,7 +161,7 @@ fn main_result() -> Result<i32, Error> {
                     .x_config_key(repeat)
                     .id(&uinput_id);
             }
-            let events_keyboard = route_keyboard.spawn(&core.handle(), error_sender.clone());
+            let mut events_keyboard = route_keyboard.spawn(error_sender.clone());
 
             let mut route_relative = Route::new(config.qemu.routing, qemu.clone(), "screenstub-route-mouse".into(), bus.clone(), repeat);
             if let Some(builder) = route_relative.builder() {
@@ -171,7 +170,7 @@ fn main_result() -> Result<i32, Error> {
                     .x_config_rel()
                     .id(&uinput_id);
             }
-            let events_relative = route_relative.spawn(&core.handle(), error_sender.clone());
+            let mut events_relative = route_relative.spawn(error_sender.clone());
 
             let mut route_absolute = Route::new(config.qemu.routing, qemu.clone(), "screenstub-route-tablet".into(), bus, repeat);
             if let Some(builder) = route_absolute.builder() {
@@ -180,50 +179,18 @@ fn main_result() -> Result<i32, Error> {
                     .x_config_abs()
                     .id(&uinput_id);
             }
-            let events_absolute = route_absolute.spawn(&core.handle(), error_sender.clone());
+            let mut events_absolute = route_absolute.spawn(error_sender.clone());
 
             let x_filter = process.x_filter();
 
-            let process = Rc::new(process);
+            let process = Arc::new(process);
 
-            core.handle().spawn(error_recv
-                .inspect(|e| error!("{} {:?}", e, e))
-                .into_future().map(|(e, _)| e)
-                .then({ // TODO: what about recv errors??
-                    let xreq = xreq_sender.clone();
-                    move |e| if let Ok(Some(..)) = e {
-                        future::Either::A(xreq.send(XRequest::Quit).map(drop))
-                    } else {
-                        future::Either::B(future::ok(()))
-                    }
-                }).or_else(|e| Ok(error!("failed to bail out: {} {:?}", e, e)))
-            );
-
-            let (user_sender, user_receiver) = un_mpsc::channel::<Rc<ConfigEvent>>(0x08);
-            core.handle().spawn(user_receiver
-                .map_err(|_| -> Error { unreachable!() })
+            let (mut user_sender, user_receiver) = un_mpsc::channel::<Arc<ConfigEvent>>(0x08);
+            let mut user_receiver = user_receiver
                 .map({
                     let process = process.clone();
-                    move |userevent| stream::iter_ok::<_, Error>(process.process_user_event(&userevent))
-                }).flatten()
-                .map(|e| match e {
-                    // TODO: give process a xreq_sender and forget the enum here
-                    ProcessedUserEvent::UserEvent(e) => (Some(
-                        e.or_else(|e| {
-                            warn!("UserEvent failed {} {:?}", e, e);
-                            Ok(())
-                        })
-                    ), None),
-                    ProcessedUserEvent::XRequest(e) => (None, Some(e)),
-                }).unzip_spawn(&core.handle(), |s| s.filter_map(|e| e)
-                    .map_err(|_| -> mpsc::SendError<_> { unreachable!() }) // ugh come on
-                    .forward(xreq_sender).map(drop).map_err(drop)
-                ).map_err(|e| format_err!("{:?}", e))? // ugh can this even fail?
-                .filter_map(|e| e)
-                .buffer_unordered(8)
-                .map_err(drop)
-                .for_each(|_| Ok(()))
-            );
+                    move |event| process.process_user_event(&event)
+                });
 
             let mut events = event::Events::new();
             config.hotkeys.into_iter()
@@ -231,156 +198,113 @@ fn main_result() -> Result<i32, Error> {
                 .for_each(|(hotkey, on_press)| events.add_hotkey(hotkey, on_press));
             config.key_remap.into_iter().for_each(|(from, to)| events.add_remap(from, to));
 
-            let events = Rc::new(RefCell::new(events));
+            let events = Arc::new(Mutex::new(events));
 
-            let (event_process_send, event_process_recv) = un_mpsc::channel(EVENT_BUFFER);
-            core.handle().spawn(event_process_recv
-                .map_err(|_| -> Error { unreachable!() })
-                .map({
-                    let events = events.clone();
-                    move |inputevent| stream::iter_ok::<_, Error>(events.borrow_mut().process_input_event(&inputevent))
-                }).flatten()
-                .map_err(|_| -> un_mpsc::SendError<_> { unreachable!() })
-                .forward(user_sender.clone()).map(drop).map_err(drop)
-            );
-
-            let (event_route_send, event_route_recv) = un_mpsc::channel(EVENT_BUFFER);
-            core.handle().spawn(
-                event_recv.map_err(drop).forward(event_route_send.fanout(event_process_send).sink_map_err(drop))
-                .map(drop).map_err(drop)
-            );
-            core.handle().spawn(event_route_recv
-                .map_err(|_| -> Error { unreachable!() })
-                .map({
-                    let events = events.clone();
-                    move |e| events.borrow_mut().map_input_event(e)
-                })
-                .fold((events_keyboard, events_relative, events_absolute), {
-                    let process = process.clone();
-                    move |(events_keyboard, events_relative, events_absolute), e| {
-                        macro_rules! send_event {
-                            ($e:ident => keyboard) => {
-                                Either::A(Either::A(events_keyboard.send($e)
-                                    .map(|events_keyboard| (events_keyboard, events_relative, events_absolute))
-                                    .map_err(Error::from)))
-                            };
-                            ($e:ident => relative) => {
-                                Either::A(Either::B(events_relative.send($e)
-                                    .map(|events_relative| (events_keyboard, events_relative, events_absolute))
-                                    .map_err(Error::from)))
-                            };
-                            ($e:ident => absolute) => {
-                                Either::B(Either::A(events_absolute.send($e)
-                                    .map(|events_absolute| (events_keyboard, events_relative, events_absolute))
-                                    .map_err(Error::from)))
-                            };
-                            ($e:ident => all) => {
-                                Either::B(Either::B(Either::A(
-                                    events_keyboard.send($e)
-                                        .and_then(move |events_keyboard|
-                                            events_relative.send($e)
-                                                .and_then(move |events_relative|
-                                                    events_absolute.send($e)
-                                                    .map(|events_absolute| (events_keyboard, events_relative, events_absolute))
-                                                )
-                                        )
-                                    .map_err(Error::from)
-                                )))
-                            };
-                            (pass) => {
-                                Either::B(Either::B(Either::B(
-                                    future::ok((events_keyboard, events_relative, events_absolute))
-                                )))
-                            };
-                        }
-
-                        let kind = match e.kind {
-                            EventKind::Key if Key::from_code(e.code).map(|k| k.is_button()).unwrap_or(false) => {
-                                if process.is_mouse() {
-                                    EventKind::Relative
-                                } else {
-                                    EventKind::Absolute
-                                }
-                            },
-                            EventKind::Key => {
-                                EventKind::Key
-                            },
-                            EventKind::Absolute if e.code == AbsoluteAxis::Volume as u16 => {
-                                EventKind::Key // is this right?
-                            },
-                            EventKind::Relative if RelativeAxis::from_code(e.code).map(|a| axis_is_relative(a)).unwrap_or(false) => {
-                                EventKind::Relative
-                            },
-                            EventKind::Absolute if AbsoluteAxis::from_code(e.code).map(|a| axis_is_absolute(a)).unwrap_or(false) => {
-                                EventKind::Absolute
-                            },
-                            EventKind::Relative | EventKind::Absolute => {
-                                if process.is_mouse() {
-                                    EventKind::Relative
-                                } else {
-                                    EventKind::Absolute
-                                }
-                            },
-                            EventKind::Synchronize => {
-                                EventKind::Synchronize
-                            },
-                            kind => {
-                                warn!("unforwarded event {:?}", kind);
-                                kind
-                            },
+            let (event_loop, event_loop_abort) = future::abortable({
+                let events = events.clone();
+                let process = process.clone();
+                let mut user_sender = user_sender.clone();
+                async move {
+                    while let Some(event) = event_recv.next().await {
+                        let mut events = events.lock().await;
+                        let inputevent = events.map_input_event(event.clone());
+                        let user_sender = &mut user_sender;
+                        let f1 = async move {
+                            for e in events.process_input_event(&event) {
+                                let _ = user_sender.send(e.clone()).await;
+                            }
                         };
+                        let is_mouse = process.is_mouse();
 
-                        match kind {
-                            EventKind::Key => send_event!(e => keyboard),
-                            EventKind::Relative => send_event!(e => relative),
-                            EventKind::Absolute => send_event!(e => absolute),
-                            EventKind::Synchronize => send_event!(e => all),
-                            _ => send_event!(pass),
+                        let events_keyboard = &mut events_keyboard;
+                        let events_relative = &mut events_relative;
+                        let events_absolute = &mut events_absolute;
+                        let f2 = async move {
+                            match map_event_kind(&inputevent, is_mouse) {
+                                EventKind::Key => {
+                                    let _ = events_keyboard.send(inputevent).await;
+                                },
+                                EventKind::Relative => {
+                                    let _ = events_relative.send(inputevent).await;
+                                },
+                                EventKind::Absolute => {
+                                    let _ = events_absolute.send(inputevent).await;
+                                },
+                                EventKind::Synchronize => {
+                                    let _ = future::try_join3(
+                                        events_keyboard.send(inputevent),
+                                        events_relative.send(inputevent),
+                                        events_absolute.send(inputevent)
+                                    ).await;
+                                },
+                                _ => (),
+                            }
+                        };
+                        let _ = future::join(f1, f2).await;
+                    }
+                }
+            });
+            let event_loop = tokio::spawn(event_loop.map(drop))
+                .map_err(Error::from);
+
+            let (xevent_exit_send, xevent_exit_recv) = oneshot::channel();
+            let mut xevent_exit_recv = xevent_exit_recv.fuse();
+            let xevent_loop = tokio::spawn({
+                async move {
+                    while let Some(xevent) = x_receiver.next().await {
+                        let events = events.lock().await.process_x_event(&xevent);
+                        for e in events {
+                            match e {
+                                ProcessedXEvent::UserEvent(e) => {
+                                    let _ = user_sender.send(convert_user_event(e)).await;
+                                },
+                                ProcessedXEvent::InputEvent(e) if x_filter.try_lock().unwrap().filter_event(&e) => {
+                                    let _ = event_sender.send(e).await;
+                                },
+                                ProcessedXEvent::InputEvent(_) => (),
+                            }
                         }
                     }
-                }).map(drop)
-                .or_else(|e| error_sender.send(e).map(drop).map_err(drop))
-            );
 
-            let handle = core.handle();
-            core.run(x_receiver
-                .map_err(|_| -> Error { unreachable!() })
-                .and_then(|e| e)
-                .map({
-                    move |xevent| stream::iter_ok::<_, Error>(events.borrow_mut().process_x_event(&xevent))
-                }).flatten()
-                .map(|e| match e {
-                    ProcessedXEvent::InputEvent(e) => (Some(e), None),
-                    ProcessedXEvent::UserEvent(e) => (None, Some(e)),
-                }).unzip_spawn(&handle, |s| s.filter_map(|e| e)
-                    .map(convert_user_event)
-                    .map_err(|_| -> un_mpsc::SendError<_> { unreachable!() }) // ugh come on
-                    .forward(user_sender).map(drop).map_err(drop)
-                ).map_err(|e| format_err!("{:?}", e))? // ugh can this even fail?
-                .filter_map(|e| e)
-                .filter(|e| x_filter.borrow().filter_event(e))
-                .forward(event_sender).map(drop).map_err(drop)
-            ).unwrap();
+                    let _ = xevent_exit_send.send(());
+                }
+            }).map_err(From::from);
 
-            if let Err(e) = core.run(
-                stream::iter_result(
-                    config.exit_events.into_iter()
-                    .map(|e| process.process_user_event(&e))
-                    .flat_map(|e| e)
-                    .map(|e| match e {
-                        ProcessedUserEvent::UserEvent(e) => Ok(e),
-                        ProcessedUserEvent::XRequest(x) => Err(format_err!("event {:?} cannot be processed at exit", x)),
-                    })
-                ).and_then(|e| e).for_each(|()| Ok(()))
-            ) {
-                error!("Failed to run exit events: {} {:?}", e, e);
-            }
+            let res = loop {
+                let mut qmp_poll = future::poll_fn(|cx| qemu.poll_qmp_events(cx)).fuse();
+                futures::select! {
+                    _ = xevent_exit_recv => break Ok(()),
+                    error = error_recv.next() => if let Some(error) = error {
+                        break Err(error)
+                    },
+                    event = user_receiver.next() => if let Some(event) = event {
+                        tokio::spawn(async move {
+                            match Pin::from(event).await {
+                                Err(e) =>
+                                    warn!("User event failed {} {:?}", e, e),
+                                Ok(()) => (),
+                            }
+                        });
+                    },
+                    e = qmp_poll => {
+                        trace!("Ignoring QMP event {:?}", e);
+                    },
+                }
+            };
 
-            // TODO: go back to host at this point before exiting
+            let _ = xreq_sender.send(XRequest::Quit).await; // ensure we kill x
+            drop(xreq_sender);
+            drop(process);
 
-            xthread.join().unwrap()?; // TODO: get this properly
+            // seal off senders
+            event_loop_abort.abort();
+            future::try_join3(
+                event_loop,
+                xevent_loop,
+                xmain,
+            ).await?;
 
-            Ok(0)
+            res.map(|()| 0)
         },
         #[cfg(feature = "with-ddcutil")]
         ("detect", Some(..)) => {
@@ -404,13 +328,12 @@ fn main_result() -> Result<i32, Error> {
         ("input", Some(matches)) => {
             let config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
 
-            let mut core = Core::new()?;
-            let qemu = Rc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
-            let inputs = Inputs::new(core.handle(), qemu, config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
+            let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
+            let inputs = Inputs::new(qemu, config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
 
             match matches.value_of("input") {
-                Some("host") => core.run(inputs.show_host()),
-                Some("guest") => core.run(inputs.show_guest()), // TODO: bypass check for guest agent
+                Some("host") => inputs.show_host().await,
+                Some("guest") => inputs.show_guest().await, // TODO: bypass check for guest agent
                 _ => unreachable!("unknown input to switch to"),
             }.map(|_| 0)
         },
@@ -432,8 +355,9 @@ fn axis_is_absolute(axis: AbsoluteAxis) -> bool {
     }
 }
 
-fn convert_user_event(event: UserEvent) -> Rc<ConfigEvent> {
-    Rc::new(match event {
+fn convert_user_event(event: UserEvent) -> Arc<ConfigEvent> {
+    Arc::new(match event {
+        UserEvent::Quit => ConfigEvent::Exit,
         UserEvent::ShowGuest => ConfigEvent::ShowGuest,
         UserEvent::ShowHost => ConfigEvent::ShowHost,
         UserEvent::UnstickGuest => ConfigEvent::UnstickGuest,
@@ -441,9 +365,40 @@ fn convert_user_event(event: UserEvent) -> Rc<ConfigEvent> {
     })
 }
 
-fn convert_hotkey(hotkey: config::ConfigHotkey) -> (Hotkey<ConfigEvent>, bool) {
+fn convert_hotkey(hotkey: config::ConfigHotkey) -> (Hotkey<Arc<ConfigEvent>>, bool) {
     (
-        Hotkey::new(hotkey.triggers, hotkey.modifiers, hotkey.events),
+        Hotkey::new(hotkey.triggers, hotkey.modifiers, hotkey.events.into_iter().map(Arc::new)),
         !hotkey.on_release,
     )
+}
+
+fn map_event_kind(inputevent: &InputEvent, is_mouse: bool) -> EventKind {
+    match inputevent.kind {
+        EventKind::Key if Key::from_code(inputevent.code).map(|k| k.is_button()).unwrap_or(false) =>
+            if is_mouse {
+                EventKind::Relative
+            } else {
+                EventKind::Absolute
+            },
+        EventKind::Key =>
+            EventKind::Key,
+        EventKind::Absolute if inputevent.code == AbsoluteAxis::Volume as u16 =>
+            EventKind::Key, // is this right?
+        EventKind::Relative if RelativeAxis::from_code(inputevent.code).map(|a| axis_is_relative(a)).unwrap_or(false) =>
+            EventKind::Relative,
+        EventKind::Absolute if AbsoluteAxis::from_code(inputevent.code).map(|a| axis_is_absolute(a)).unwrap_or(false) =>
+            EventKind::Absolute,
+        EventKind::Relative | EventKind::Absolute =>
+            if is_mouse {
+                EventKind::Relative
+            } else {
+                EventKind::Absolute
+            },
+        EventKind::Synchronize =>
+            EventKind::Synchronize,
+        kind => {
+            warn!("unforwarded event {:?}", kind);
+            kind
+        },
+    }
 }

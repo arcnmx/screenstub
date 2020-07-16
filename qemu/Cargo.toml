@@ -1,11 +1,14 @@
 [package]
 name = "screenstub-qemu"
 version = "0.0.1"
+edition = "2018"
 
 [dependencies]
-futures = "^0.1.18"
+futures = "^0.3.5"
 failure = "^0.1.1"
 log = "^0.4.1"
-tokio-core = "^0.1.12"
-tokio-uds = "^0.1.7"
-tokio-qapi = { version = "^0.0.2", features = ["qmp", "qga"] }
+tokio = { version = "^0.2.0", default-features = false, features = ["time", "uds"] }
+tokio-qapi = { version = "^0.4.0", features = ["qmp", "qga"] }
+
+[patch.crates-io]
+tokio-qapi = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }

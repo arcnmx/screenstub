@@ -38,6 +38,8 @@ pub enum ConfigDdcHost {
     None,
     #[cfg(feature = "with-ddcutil")]
     Libddcutil,
+    #[cfg(feature = "with-ddc")]
+    Ddc,
     Ddcutil,
     Exec(Vec<String>),
 }
@@ -48,7 +50,12 @@ impl Default for ConfigDdcHost {
         ConfigDdcHost::Libddcutil
     }
 
-    #[cfg(not(feature = "with-ddcutil"))]
+    #[cfg(feature = "with-ddc")]
+    fn default() -> Self {
+        ConfigDdcHost::Ddc
+    }
+
+    #[cfg(not(any(feature = "with-ddcutil", feature = "with-ddc")))]
     fn default() -> Self {
         ConfigDdcHost::None
     }
@@ -128,7 +135,7 @@ impl ConfigQemuDriver {
 pub enum ConfigQemuRouting {
     InputLinux,
     VirtioHost,
-    //Spice,
+    Spice,
     Qmp,
 }
 

@@ -1,9 +1,12 @@
 [package]
 name = "screenstub-x"
 version = "0.0.1"
+edition = "2018"
 
 [dependencies]
-futures = "^0.1.18"
+futures = { version = "^0.3.4", features = ["bilock", "unstable"] }
+tokio = { version = "^0.2.0", default-features = false, features = ["io-driver", "rt-threaded", "blocking"] }
+mio = { version = "^0.6.0", default-features = false }
 failure = "^0.1.1"
-xcb = { version = "^0.8.1", features = ["xtest", "xkb"] }
+xcb = { version = "^0.9.0", features = ["xtest", "xkb", "dpms"] }
 log = "^0.4.1"

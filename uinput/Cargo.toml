@@ -1,13 +1,17 @@
 [package]
 name = "screenstub-uinput"
 version = "0.0.1"
+edition = "2018"
 
 [dependencies]
-input-linux = { version = "^0.0.1", features = ["with-tokio"] }
+input-linux = { version = "^0.1.0", features = ["with-tokio"] }
+futures = { version = "^0.3.4", features = ["bilock", "unstable"] }
+tokio = { version = "^0.2.0", default-features = false, features = ["macros", "time", "io-util", "io-driver", "rt-core"] }
+tokio-util = { version = "^0.3.0", default-features = false, features = [ "codec" ] }
 tokio-fd = { path = "../tokio-fd" }
-tokio-io = "^0.1.5"
-tokio-core = "^0.1.12"
-futures = "^0.1.18"
-bytes = "^0.4.0"
+bytes = "^0.5.0"
 log = "^0.4.1"
 libc = "^0.2.36"
+
+[patch.crates-io]
+input-linux = { git = "https://github.com/arcnmx/input-linux-rs.git" }

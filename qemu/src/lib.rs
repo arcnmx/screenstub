@@ -1,47 +1,173 @@
-extern crate tokio_qapi as qapi;
-extern crate tokio_uds;
-extern crate tokio_core;
-#[macro_use]
-extern crate futures;
-extern crate failure;
-#[macro_use]
-extern crate log;
-
-use std::{io, mem};
+use std::{io, ops, os::unix::net};
+use std::pin::Pin;
+use std::task::{Context, Waker, Poll};
+use std::sync::{Mutex, Arc, Weak};
+use std::time::Duration;
+use std::future::Future;
 use failure::Error;
-use futures::{Future, Stream, Sink, Poll, Async, future};
-use tokio_core::reactor::Handle;
-use tokio_uds::UnixStream;
-use qapi::{
+use futures::{Stream, TryFutureExt, FutureExt, StreamExt, poll};
+use futures::future::{AbortHandle, abortable};
+use futures::stream::FusedStream;
+use tokio::net::UnixStream;
+use tokio::time::delay_for;
+use tokio::io::{ReadHalf, WriteHalf};
+use tokio::pin;
+use tokio_qapi::qmp::QapiCapabilities;
+use tokio_qapi::{
     Command,
-    QapiDataStream, QapiStream, QapiEventStream, QapiFuture,
-    QmpHandshake, QgaHandshake,
+    QapiEvents, QapiStream,
     qga, qmp,
 };
+use log::trace;
 
 pub struct Qemu {
     socket_qmp: Option<String>,
     socket_qga: Option<String>,
+    qmp: Mutex<Weak<QmpHandle>>,
+    qmp_waker: Mutex<Option<Waker>>,
+    connection_lock: futures::lock::Mutex<()>,
 }
 
-pub type QemuStream = QapiDataStream<UnixStream>;
+pub struct QmpHandle {
+    stream: QemuStream,
+    events: Mutex<Pin<Box<dyn FusedStream<Item=io::Result<qmp::Event>> + Send>>>,
+}
 
-pub type QgaFuture = ConnectFuture<QgaHandshake<QemuStream>, io::Error>;
-pub type QmpFuture = QmpConnectResult<ConnectFuture<QmpHandshake<QemuStream>, io::Error>>;
-pub type QemuFuture<F, C> = CommandFuture<F, QemuStream, C>;
+impl<'a> Stream for &'a QmpHandle {
+    type Item = io::Result<qmp::Event>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let mut events = self.events.lock().unwrap();
+        events.as_mut().poll_next(cx)
+    }
+}
+
+impl<'a> FusedStream for &'a QmpHandle {
+    fn is_terminated(&self) -> bool {
+        self.events.lock().unwrap().is_terminated()
+    }
+}
+
+impl ops::Deref for QmpHandle {
+    type Target = QemuStream;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stream
+    }
+}
+
+pub type QemuStreamRead = ReadHalf<UnixStream>;
+pub type QemuStreamWrite = WriteHalf<UnixStream>;
+pub type QemuStream = QapiStream<QemuStreamWrite>;
+pub type QemuEvents = QapiEvents<QemuStreamRead>;
 
 impl Qemu {
     pub fn new(socket_qmp: Option<String>, socket_qga: Option<String>) -> Self {
         Qemu {
-            socket_qmp: socket_qmp,
-            socket_qga: socket_qga,
+            socket_qmp,
+            socket_qga,
+            qmp: Mutex::new(Weak::new()),
+            qmp_waker: Mutex::new(None),
+            connection_lock: Default::default(),
         }
     }
 
-    pub fn qmp_events(&self, handle: &Handle) -> Box<Future<Item=QapiEventStream<QemuStream>, Error=Error>> {
+    pub fn poll_qmp_events(&self, cx: &mut Context) -> Poll<Option<io::Result<qmp::Event>>> {
+        match self.qmp.lock().unwrap().upgrade() {
+            Some(qmp) => {
+                Pin::new(&mut &*qmp).poll_next(cx)
+            },
+            None => {
+                *self.qmp_waker.lock().unwrap() = Some(cx.waker().clone());
+                Poll::Pending
+            },
+        }
+    }
+
+    pub async fn qmp_clone(&self) -> Result<Arc<QmpHandle>, Error> {
+        let _lock = self.connection_lock.lock().await;
+        let qmp = self.qmp.lock().unwrap().upgrade();
+        match qmp {
+            Some(res) => Ok(res),
+            None => {
+                let (_caps, stream, events) = self.connect_qmp_events().await?;
+                let mut qmp = self.qmp.lock().unwrap();
+                Ok(match qmp.upgrade() {
+                    // if two threads fight for this, just ditch this new connection
+                    Some(qmp) => qmp,
+                    None => {
+                        let res = Arc::new(QmpHandle {
+                            stream,
+                            events: Mutex::new(Box::pin(events.into_stream())),
+                        });
+                        *qmp = Arc::downgrade(&res);
+                        if let Some(waker) = self.qmp_waker.lock().unwrap().take() {
+                            waker.wake();
+                        }
+                        res
+                    },
+                })
+            },
+        }
+    }
+
+    pub async fn qmp_events(&self) -> Result<QemuEvents, io::Error> {
+        self.connect_qmp_events()
+            .map_ok(|(_caps, _stream, events)| events).await
+    }
+
+    pub fn connect_qmp_events(&self) -> impl Future<Output=Result<(QapiCapabilities, QemuStream, QemuEvents), io::Error>> {
+        let socket_qmp = self.socket_qmp.as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "QMP socket not configured"))
+            .and_then(|path| net::UnixStream::connect(path));
+
+        async move {
+            let socket = UnixStream::from_std(socket_qmp?)?;
+            QapiStream::open_tokio(socket).await
+        }
+    }
+
+    async fn connect_qmp_(&self) -> Result<(QapiCapabilities, QemuStream, AbortHandle), io::Error> {
+        let (caps, stream, events) = self.connect_qmp_events().await?;
+
+        let (events, abort) = abortable(events.spin());
+
+        tokio::spawn(events.map_err(drop).boxed());
+
+        Ok((caps, stream, abort))
+    }
+
+    pub async fn connect_qmp(&self) -> Result<(QemuStream, AbortHandle), io::Error> {
+        self.connect_qmp_()
+            .map_ok(|(_caps, stream, abort)| (stream, abort)).await
+    }
+
+    fn connect_qga_(&self) -> impl Future<Output=Result<(QemuStream, AbortHandle), io::Error>> {
+        let socket_qga = self.socket_qga.as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "QGA socket not configured"))
+            .and_then(|path| net::UnixStream::connect(path));
+
+        async move {
+            let socket = UnixStream::from_std(socket_qga?)?;
+            let (stream, events) = QapiStream::open_tokio_qga(socket).await?;
+
+            let (events, abort) = abortable(events);
+
+            tokio::spawn(events.map_err(drop).boxed());
+
+            Ok((stream, abort))
+        }
+    }
+
+    pub async fn connect_qga(&self) -> Result<(QemuStream, AbortHandle), io::Error> {
+        self.connect_qga_()
+            .map_ok(|(stream, abort)| (stream, abort)).await
+    }
+
+    /*pub fn qmp_events(&self) -> Box<Future<Item=QapiEventStream<QemuStream>, Error=Error>> {
         Box::new(future::result(
                 self.socket_qga.as_ref().ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "QGA socket not configured"))
-                .and_then(|socket| UnixStream::connect(socket, handle))
+                .and_then(|socket| UnixStream::connect(socket))
                 .map_err(Error::from)
             ).map(qapi::event_stream)
             .and_then(|(s, e)|
@@ -49,9 +175,9 @@ impl Qemu {
                 .map_err(Error::from)
             )
         ) as Box<_>
-    }
+    }*/
 
-    fn connect_qmp_(&self, handle: &Handle) -> io::Result<QmpHandshake<QemuStream>> {
+    /*fn connect_qmp_(&self) -> io::Result<QmpHandshake<QemuStream>> {
         if let Some(ref socket) = self.socket_qmp {
             let stream = UnixStream::connect(socket, handle)?;
             Ok(qapi::qmp_handshake(qapi::stream(stream)))
@@ -60,47 +186,66 @@ impl Qemu {
         }
     }
 
-    fn connect_qga_(&self, handle: &Handle) -> io::Result<QgaHandshake<QemuStream>> {
+    fn connect_qga_(&self) -> io::Result<QgaHandshake<QemuStream>> {
         if let Some(ref socket) = self.socket_qga {
             let stream = UnixStream::connect(socket, handle)?;
             Ok(qapi::qga_handshake(qapi::stream(stream)))
         } else {
             Err(io::Error::new(io::ErrorKind::AddrNotAvailable, "QGA socket not configured"))
         }
-    }
+    }*/
 
-    pub fn connect_qga(&self, handle: &Handle) -> QgaFuture {
+    /*pub fn connect_qga(&self) -> QgaFuture {
         ConnectFuture::new(self.connect_qga_(handle))
+    }*/
+
+    pub async fn execute_qga<C: Command + 'static>(&self, command: C) -> Result<C::Ok, io::Error> {
+        let (qga, abort) = self.connect_qga_().await?;
+        let res = qga.execute(command).await;
+        abort.abort();
+        res
+            .map_err(From::from)
+            .and_then(|r| r.map_err(From::from))
     }
 
-    pub fn connect_qmp_events(&self, handle: &Handle) -> Box<Future<Item=(QapiStream<QemuStream>, QapiEventStream<QemuStream>), Error=Error>> {
-        Box::new(future::result(
-                self.socket_qmp.as_ref().ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "QMP socket not configured"))
-                .and_then(|socket| UnixStream::connect(socket, handle))
-                .map_err(Error::from)
-            ).map(qapi::event_stream)
-            .and_then(|(s, e)|
-                qapi::qmp_handshake(s).map(|(_, s)| (s, e))
-                .map_err(Error::from)
-            )
-        ) as Box<_>
+    pub async fn execute_qmp<C: Command + 'static>(&self, command: C) -> Result<C::Ok, Error> {
+        /*let (_caps, qmp, abort) = self.connect_qmp_().await?;
+        let res = qmp.execute(command).await;
+        abort.abort();
+        res
+            .map_err(From::from)
+            .and_then(|r| r.map_err(From::from))*/
+        self.qmp_clone().await?.execute(command).await
+            .map_err(From::from)
+            .and_then(|r| r.map_err(From::from))
     }
 
-    pub fn connect_qmp(&self, handle: &Handle) -> QmpFuture {
-        QmpConnectResult::new(ConnectFuture::new(self.connect_qmp_(handle)))
+    pub fn guest_exec_(&self, exec: qga::guest_exec) -> impl Future<Output=Result<qga::GuestExecStatus, Error>> {
+        let connect = self.connect_qga_();
+        async move {
+            trace!("QEMU GA Exec {:?}", exec);
+
+            let (qga, abort) = connect.await?;
+            let res = match qga.execute(exec).await {
+                Ok(Ok(qga::GuestExec { pid })) => loop {
+                    let res = qga.execute(qga::guest_exec_status { pid }).await
+                        .map_err(From::from)
+                        .and_then(|r| r.map_err(From::from));
+                    match res {
+                        Ok(r) if !r.exited => delay_for(Duration::from_millis(100)).await,
+                        res => break res,
+                    }
+                },
+                Ok(Err(e)) => Err(e.into()),
+                Err(e) => Err(e.into()),
+            };
+
+            abort.abort();
+            res
+        }
     }
 
-    pub fn execute_qga<C: Command + 'static>(&self, handle: &Handle, command: C) -> ResultFuture<QemuFuture<QgaFuture, C>> {
-        ResultFuture::new(CommandFuture::new(self.connect_qga(handle), command))
-    }
-
-    pub fn execute_qmp<C: Command + 'static>(&self, handle: &Handle, command: C) -> ResultFuture<QemuFuture<QmpFuture, C>> {
-        ResultFuture::new(CommandFuture::new(self.connect_qmp(handle), command))
-    }
-
-    pub fn guest_exec<I: IntoIterator<Item=S>, S: Into<String>>(&self, handle: &Handle, args: I) -> Box<Future<Item=qga::GuestExecStatus, Error=Error>> {
-        use futures::future::{Loop, Either};
-
+    pub fn guest_exec<I: IntoIterator<Item=S>, S: Into<String>>(&self, args: I) -> GuestExec {
         let mut args = args.into_iter();
         let cmd = args.next().expect("at least one command argument expected");
 
@@ -112,170 +257,40 @@ impl Qemu {
             capture_output: Some(true),
         };
 
-        trace!("QEMU GA Exec {:?}", exec);
-
-        Box::new(
-            CommandFuture::new(self.connect_qga(handle), exec)
-                .and_then(|(qga::GuestExec { pid }, s)| future::loop_fn((s, None::<qga::GuestExecStatus>), move |(s, st)| Either::B(match st {
-                    None => s,
-                    Some(ref st) if !st.exited => s,
-                    Some(st) => return Either::A(future::ok(Loop::Break(st))),
-                }.execute(qga::guest_exec_status { pid: pid })
-                    .map_err(From::from)
-                    .and_then(|(r, s)| r.map(|r| (r, s)).map_err(From::from))
-                    .map(|(st, s)| Loop::Continue((s, Some(st))))
-                ))).and_then(|st| st.result().map_err(Error::from))
-        ) as Box<_>
+        GuestExec {
+            qemu: self,
+            exec,
+        }
     }
 
-    pub fn guest_shutdown(&self, handle: &Handle, shutdown: qga::guest_shutdown) -> Box<Future<Item=(), Error=Error>> {
-        Box::new(self.connect_qga(handle)
-            .map_err(Error::from)
-            .and_then(move |s| qapi::encode_command(&shutdown).map(|c| (s, c)).map_err(Error::from))
-            .and_then(|(s, c)| s.send(c).map_err(Error::from))
-            // TODO: attempt a single poll of the connection to check for an error, otherwise don't wait
+    pub fn guest_shutdown(&self, shutdown: qga::guest_shutdown) -> impl Future<Output=Result<(), Error>> {
+        let connect = self.connect_qga_();
+        async move {
+            let (qga, abort) = connect.await?;
+            let res = qga.execute(shutdown);
+            pin!(res);
+
+            // attempt a single poll of the connection to check for an error, otherwise don't wait
             // TODO: a shutdown (but not reboot) can be verified waiting for exit event or socket close or with --no-shutdown, query-status is "shutdown". Ugh!
-            .map(drop)) as Box<_>
-    }
-}
+            let res = match poll!(res) {
+                Poll::Ready(Err(e)) => Err(e.into()),
+                Poll::Ready(Ok(Err(e))) => Err(e.into()),
+                _ => Ok(()),
+            };
 
-pub struct QmpConnectResult<F> {
-    future: F,
-}
-
-impl<S, F> Future for QmpConnectResult<F> where
-    F: Future<Item=(qmp::QMP, S)>,
-{
-    type Item = S;
-    type Error = F::Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let (_, s) = try_ready!(self.future.poll());
-        Ok(Async::Ready(s))
-    }
-}
-
-impl<F> QmpConnectResult<F> {
-    pub fn new(f: F) -> Self {
-        QmpConnectResult {
-            future: f,
+            abort.abort();
+            res
         }
     }
 }
 
-pub struct ConnectFuture<F, E> {
-    future: Option<Result<F, E>>,
+pub struct GuestExec<'a> {
+    qemu: &'a Qemu,
+    exec: qga::guest_exec,
 }
 
-impl<F, E> ConnectFuture<F, E> {
-    fn new(f: Result<F, E>) -> Self {
-        ConnectFuture {
-            future: Some(f),
-        }
-    }
-}
-
-impl<E, F> Future for ConnectFuture<F, E> where
-    F: Future,
-    F::Error: From<E>,
-{
-    type Item = F::Item;
-    type Error = F::Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let mut future = self.future.take().expect("polled after completion")?;
-        let res = future.poll();
-        self.future = Some(Ok(future));
-        res
-    }
-}
-
-pub struct ResultFuture<F> {
-    future: F,
-}
-
-impl<F> ResultFuture<F> {
-    fn new(f: F) -> Self {
-        ResultFuture {
-            future: f,
-        }
-    }
-}
-
-impl<I, S, F: Future<Item=(I, S)>> Future for ResultFuture<F> {
-    type Item = I;
-    type Error = F::Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let (res, _) = try_ready!(self.future.poll());
-
-        Ok(Async::Ready(res))
-    }
-}
-
-pub enum CommandFuture<F, S, C: Command> {
-    Stream {
-        future: F,
-        command: C,
-    },
-    Command {
-        future: QapiFuture<C, QapiStream<S>>,
-    },
-    None,
-}
-
-impl<F, S, C: Command> CommandFuture<F, S, C> {
-    pub fn new(f: F, c: C) -> Self {
-        CommandFuture::Stream {
-            future: f,
-            command: c,
-        }
-    }
-}
-
-impl<S, C: Command> CommandFuture<future::FutureResult<QapiStream<S>, Error>, S, C> {
-    pub fn execute(stream: QapiStream<S>, command: C) -> Self {
-        CommandFuture::Command {
-            future: stream.execute(command),
-        }
-    }
-}
-
-impl<SE, C, S, F> Future for CommandFuture<F, S, C> where
-    C: Command,
-    F: Future<Item=QapiStream<S>>,
-    SE: From<io::Error>,
-    S: Stream<Error=SE> + Sink<SinkItem=Box<[u8]>, SinkError=SE>,
-    S::Item: AsRef<[u8]>,
-    io::Error: From<S::Error>,
-    Error: From<F::Error>,
-{
-    type Item = (C::Ok, QapiStream<S>);
-    type Error = Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let stream = match *self {
-            CommandFuture::Stream { ref mut future, .. } => try_ready!(future.poll()),
-            CommandFuture::Command { ref mut future } => {
-                let (res, stream) = try_ready!(future.poll());
-                let res: io::Result<_> = res.map_err(From::from);
-                return res.map(|res| Async::Ready((res, stream))).map_err(From::from)
-            },
-            CommandFuture::None => unreachable!(),
-        };
-
-        let command = match mem::replace(self, CommandFuture::None) {
-            CommandFuture::Stream { command, .. } => command,
-            _ => unreachable!(),
-        };
-
-        let mut future = stream.execute(command);
-        let res = future.poll();
-        *self = CommandFuture::Command {
-            future: future,
-        };
-
-        let (res, stream) = try_ready!(res);
-        res.map(|res| Async::Ready((res, stream))).map_err(From::from)
+impl<'a> GuestExec<'a> {
+    pub fn into_future(self) -> impl Future<Output=Result<qga::GuestExecStatus, Error>> {
+        self.qemu.guest_exec_(self.exec)
     }
 }

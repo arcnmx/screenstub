@@ -5,7 +5,11 @@ version = "0.0.1"
 [dependencies]
 serde = "^1.0.27"
 serde_derive = "^1.0.27"
-input-linux = { version = "^0.0.1", features = ["with-serde"] }
+input-linux = { version = "^0.1.0", features = ["with-serde"] }
 
 [features]
 with-ddcutil = []
+with-ddc = []
+
+[patch.crates-io]
+input-linux = { git = "https://github.com/arcnmx/input-linux-rs.git" }

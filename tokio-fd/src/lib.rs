@@ -22,8 +22,8 @@ pub fn o_nonblock() -> OpenOptions {
 impl<T> Fd<T> {
     pub fn from_fd(fd: RawFd, inner: T) -> Self {
         Fd {
-            fd: fd,
-            inner: inner,
+            fd,
+            inner,
         }
     }
 
@@ -36,12 +36,18 @@ impl<T: AsRawFd> Fd<T> {
     pub fn new(inner: T) -> Self {
         Fd {
             fd: inner.as_raw_fd(),
-            inner: inner,
+            inner,
         }
     }
 }
 
 impl<T: AsRawFd> AsRawFd for Fd<T> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+impl<'a, T: AsRawFd> AsRawFd for &'a Fd<T> {
     fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
     }

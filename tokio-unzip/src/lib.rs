@@ -91,7 +91,7 @@ pub struct UnzipStream<S: Stream<Item=(A, B)>, A, B> {
 impl<S: Stream<Item=(A, B)>, A, B> Unzip<S, A, B> {
     pub fn new(stream: S) -> (Self, UnzipStream<S, A, B>) {
         let inner = Rc::new(RefCell::new(UnzipInner {
-            stream: stream,
+            stream,
             error: None,
             fused: false,
             closed: (false, false),

@@ -18,12 +18,12 @@
     #name: HDMI-1
     #value: 0x11
   qemu:
-    #routing: qmp # (default) qmp is slow but does not require uinput or dependencies
-    #routing: spice # does not require uinput # CURRENTLY UNIMPLEMENTED
+    #routing: qmp # (default) slower but does not require extra configuration or dependencies
+    #routing: spice # no external requirements # CURRENTLY UNIMPLEMENTED
     #routing: input-linux # requires uinput
     #routing: virtio-host # requires uinput, recommended for performance, requires vioinput drivers in guest
-    #driver: ps2 # Use PS/2 in the guest
-    #driver: usb # Use USB mouse/tablet in the guest
+    #driver: ps2 # use PS/2 in the guest (absolute mouse mode unsupported)
+    #driver: usb # (default) use USB mouse/tablet in the guest
     #driver: virtio # Recommended but vioinput drivers must be installed in guest
     #keyboard_driver: virtio # can also be set separately per input type, this should rarely be necessary
     #relative_driver: virtio
@@ -31,12 +31,12 @@
     qmp_socket: /tmp/vfio-qmp # path to QMP socket
     ga_socket: /tmp/vfio-qga # path to Guest Agent socket
   key_remap: # Arbitrary keys can be remapped in the guest
-    # See https://arcnmx.github.io/input-linux-rs/input_linux/enum.Key.html for a list of key names available (mouse buttons can also be used)
-    KeyLeftMeta: KeyReserved # disable the windows key
-    KeyRightAlt: KeyLeftMeta # remap right alt to trigger the windows key
+    # See https://docs.rs/input-linux/*/input_linux/enum.Key.html for a list of key names available (mouse buttons can also be used)
+    LeftMeta: Reserved # disable the windows key
+    RightAlt: LeftMeta # remap right alt to trigger the windows key
   hotkeys: # Trigger various events on key combinations
-  - triggers: [KeyG]
-    modifiers: [KeyLeftMeta]
+  - triggers: [G]
+    modifiers: [LeftMeta]
     on_release: false # trigger on downpress of key
     global: false # optionally trigger even when not in focus # CURRENTLY UNIMPLEMENTED
     events: # Select which events to trigger with this hotkey
@@ -53,8 +53,8 @@
     #- shutdown # safely shuts the guest system down
     #- reboot # reboots the guest
     #- exit # quits screenstub
-  - triggers: [KeyY]
-    modifiers: [KeyLeftMeta]
+  - triggers: [Y]
+    modifiers: [LeftMeta]
     events:
     - toggle_grab: xcore
     - toggle_grab:
@@ -66,8 +66,8 @@
           devices: # List of devices to forward to guest
           - /dev/input/by-id/my-event-mouse
     - unstick_host # force-depress all Xorg keys (prevents keys getting stuck)
-  - triggers: [KeyT]
-    modifiers: [KeyLeftMeta]
+  - triggers: [T]
+    modifiers: [LeftMeta]
     on_release: false
     events:
     - toggle_show

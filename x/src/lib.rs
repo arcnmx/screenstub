@@ -1,16 +1,12 @@
-extern crate futures;
-#[macro_use]
-extern crate failure;
-#[macro_use]
-extern crate log;
 pub extern crate xcb;
 
-use std::sync::Arc;
-use std::fmt;
-use futures::sync::mpsc::{Sender, Receiver, TrySendError};
-use futures::executor::{self, Notify, NotifyHandle};
-use futures::Async;
-use failure::Error;
+use futures::{Sink, Stream, ready};
+use futures::stream::FusedStream;
+use failure::{Error, format_err};
+use tokio::io::Registration;
+use std::task::{Poll, Context, Waker};
+use std::pin::Pin;
+use log::{trace, warn, info};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct XState {
@@ -26,6 +22,7 @@ pub enum XEvent {
     Visible(bool),
     Focus(bool),
     UnstickGuest,
+    Close,
     Mouse {
         x: i16,
         y: i16,
@@ -54,12 +51,17 @@ pub enum XRequest {
 
 pub struct XContext {
     conn: xcb::Connection,
+    fd: Registration,
     window: u32,
 
     keys: xcb::GetKeyboardMappingReply,
     mods: xcb::GetModifierMappingReply,
     state: XState,
     next_event: Option<xcb::GenericEvent>,
+    next_request: Option<XRequest>,
+    next_result: Option<XEvent>,
+    next_waker: Option<Waker>,
+    stop_waker: Option<Waker>,
 
     atom_wm_state: xcb::Atom,
     atom_wm_protocols: xcb::Atom,
@@ -68,6 +70,8 @@ pub struct XContext {
     atom_net_wm_state_fullscreen: xcb::Atom,
     atom_atom: xcb::Atom,
 }
+
+unsafe impl Send for XContext { }
 
 pub trait SpinSendValue {
     fn skip_threshold(&self) -> Option<usize>;
@@ -88,6 +92,11 @@ impl SpinSendValue for Result<XEvent, Error> {
 impl XContext {
     pub fn connect() -> Result<Self, Error> {
         let (conn, screen_num) = xcb::Connection::connect(None)?;
+        let fd = {
+            let fd = unsafe { xcb::ffi::base::xcb_get_file_descriptor(conn.get_raw_conn()) };
+            let fd = mio::unix::EventedFd(&fd);
+            Registration::new_with_ready(&fd, mio::Ready::readable())
+        }?;
         let window = conn.generate_id();
         let (keys, mods) = {
             let setup = conn.get_setup();
@@ -121,7 +130,7 @@ impl XContext {
             )
         };
 
-        Ok(XContext {
+        Ok(Self {
             atom_wm_state: xcb::intern_atom(&conn, true, "WM_STATE").get_reply()?.atom(),
             atom_wm_protocols: xcb::intern_atom(&conn, true, "WM_PROTOCOLS").get_reply()?.atom(),
             atom_wm_delete_window: xcb::intern_atom(&conn, true, "WM_DELETE_WINDOW").get_reply()?.atom(),
@@ -129,13 +138,19 @@ impl XContext {
             atom_net_wm_state_fullscreen: xcb::intern_atom(&conn, true, "_NET_WM_STATE_FULLSCREEN").get_reply()?.atom(),
             atom_atom: xcb::intern_atom(&conn, true, "ATOM").get_reply()?.atom(),
 
-            keys: keys,
-            mods: mods,
+            keys,
+            mods,
             state: Default::default(),
             next_event: None,
 
-            conn: conn,
-            window: window,
+            next_result: None,
+            next_request: None,
+            next_waker: None,
+            stop_waker: None,
+
+            conn,
+            fd,
+            window,
         })
     }
 
@@ -192,16 +207,27 @@ impl XContext {
     }
 
     pub fn pump(&mut self) -> Result<xcb::GenericEvent, Error> {
-        if self.next_event.is_none() {
-            if let Some(event) = self.conn.wait_for_event() {
-                Ok(event)
-            } else {
-                Err(self.connection_error().unwrap().into())
+        match self.next_event.take() {
+            Some(e) => Ok(e),
+            None => {
+                if let Some(event) = self.conn.wait_for_event() {
+                    Ok(event)
+                } else {
+                    Err(self.connection_error().unwrap().into())
+                }
             }
-        } else {
-            match self.next_event.take() {
-                Some(e) => Ok(e),
-                None => unreachable!(),
+        }
+    }
+
+    pub fn poll(&mut self) -> Result<Option<xcb::GenericEvent>, Error> {
+        match self.next_event.take() {
+            Some(e) => Ok(Some(e)),
+            None => {
+                if let Some(event) = self.conn.poll_for_event() {
+                    Ok(Some(event))
+                } else {
+                    self.connection_error().map(|e| Err(e.into())).transpose()
+                }
             }
         }
     }
@@ -231,10 +257,15 @@ impl XContext {
     }
 
     pub fn stop(&mut self) {
+        log::trace!("XContext::stop()");
+
         self.state.running = false;
+        if let Some(waker) = self.stop_waker.take() {
+            waker.wake();
+        }
     }
 
-    fn spin_send_once<T>(sender: &mut Sender<T>, value:T) -> Result<Option<T>, TrySendError<T>> {
+    /*fn spin_send_once<T>(sender: &mut Sender<T>, value:T) -> Result<Option<T>, TrySendError<T>> {
         match sender.try_send(value) {
             Ok(..) => Ok(None),
             Err(err) => {
@@ -245,9 +276,9 @@ impl XContext {
                 }
             },
         }
-    }
+    }*/
 
-    pub fn spin_send<T: fmt::Debug + SpinSendValue>(sender: &mut Sender<T>, value: T) -> Result<(), TrySendError<T>> {
+    /*pub fn spin_send<T: fmt::Debug + SpinSendValue>(sender: &mut Sender<T>, value: T) -> Result<(), TrySendError<T>> {
         use std::thread::sleep;
         use std::time::Duration;
 
@@ -280,29 +311,25 @@ impl XContext {
         }
 
         Ok(())
+    }*/
+
+    pub fn xmain() -> Result<Self, Error> {
+        let mut xcontext = Self::connect()?;
+        xcontext.state.running = true;
+        xcontext.map_window()?;
+        Ok(xcontext)
     }
 
-    pub fn xmain(recv: Receiver<XRequest>, sender: &mut Sender<Result<XEvent, Error>>) -> Result<(), Error> {
-        #[derive(Clone)]
-        struct NotifyVoid;
-        impl Notify for NotifyVoid {
-            fn notify(&self, _id: usize) { }
-        }
-        let notify = NotifyHandle::from(Arc::new(NotifyVoid));
-
+    /*pub async fn xmain(mut recv: Receiver<XRequest>, sender: &mut Sender<Result<XEvent, Error>>) -> Result<(), Error> {
         let mut xcontext = Self::connect()?;
         xcontext.state.running = true;
         xcontext.map_window()?;
 
-        let mut recv = executor::spawn(recv);
-
         while xcontext.state.running {
             // poll for request
-            let processed = match recv.poll_stream_notify(&notify, 0) {
-                Ok(Async::Ready(None)) => break, // treat this as a request to exit?
-                Ok(Async::Ready(Some(ref req))) => xcontext.process_request(req)?,
-                Ok(Async::NotReady) => None,
-                Err(..) => unreachable!(),
+            let processed = match recv.next().await {
+                None => break, // treat this as a request to exit?
+                Some(ref req) => xcontext.process_request(req)?,
             };
             // otherwise block on x event
             let processed = match processed {
@@ -324,7 +351,7 @@ impl XContext {
         }
 
         Ok(())
-    }
+    }*/
 
     fn handle_grab_status(&self, status: u8) -> Result<(), Error> {
         if status == xcb::GRAB_STATUS_SUCCESS as _ {
@@ -407,17 +434,27 @@ impl XContext {
             xcb::VISIBILITY_NOTIFY => {
                 let event = unsafe { xcb::cast_event::<xcb::VisibilityNotifyEvent>(event) };
 
-                match event.state() as _ {
-                    xcb::VISIBILITY_FULLY_OBSCURED => {
-                        Some(XEvent::Visible(false))
-                    },
-                    xcb::VISIBILITY_UNOBSCURED => {
-                        Some(XEvent::Visible(true))
-                    },
-                    state => {
-                        warn!("unknown visibility {}", state);
-                        None
-                    },
+                let dpms_blank = {
+                    let power_level = xcb::dpms::info(&self.conn).get_reply()
+                        .map(|info| info.power_level() as u32);
+
+                    power_level.unwrap_or(xcb::dpms::DPMS_MODE_ON) != xcb::dpms::DPMS_MODE_ON
+                };
+                if dpms_blank {
+                    Some(XEvent::Visible(false))
+                } else {
+                    match event.state() as _ {
+                        xcb::VISIBILITY_FULLY_OBSCURED => {
+                            Some(XEvent::Visible(false))
+                        },
+                        xcb::VISIBILITY_UNOBSCURED => {
+                            Some(XEvent::Visible(true))
+                        },
+                        state => {
+                            warn!("unknown visibility {}", state);
+                            None
+                        },
+                    }
                 }
             },
             xcb::CLIENT_MESSAGE => {
@@ -425,8 +462,7 @@ impl XContext {
 
                 match event.data().data32().get(0) {
                     Some(&atom) if atom == self.atom_wm_delete_window => {
-                        self.stop();
-                        None
+                        Some(XEvent::Close)
                     },
                     Some(&atom) => {
                         let atom = xcb::get_atom_name(&self.conn, atom).get_reply();
@@ -506,7 +542,7 @@ impl XContext {
 
                 Some(XEvent::Key {
                     pressed: kind == xcb::KEY_PRESS,
-                    keycode: keycode,
+                    keycode,
                     keysym: if keysym == Some(0) { None } else { keysym },
                     state: event.state(),
                 })
@@ -544,5 +580,101 @@ impl XContext {
                 None
             },
         })
+    }
+}
+
+impl Stream for XContext {
+    type Item = Result<XEvent, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let event = {
+            let this = self.as_mut().get_mut();
+
+            if !this.state.running {
+                return Poll::Ready(None)
+            }
+
+            match this.next_result.take() {
+                Some(res) => {
+                    if let Some(waker) = this.next_waker.take() {
+                        waker.wake();
+                    }
+                    return Poll::Ready(Some(Ok(res)))
+                },
+                None => (),
+            }
+
+            // wait for x event
+            // blocking version: this.pump()
+            let event = match this.poll()? {
+                Some(e) => Some(e),
+                None => {
+                    match this.fd.poll_read_ready(cx) {
+                        Poll::Pending => {
+                            this.stop_waker = Some(cx.waker().clone());
+                            return Poll::Pending
+                        },
+                        Poll::Ready(r) => {
+                            r?;
+                        },
+                    }
+                    this.poll()?
+                },
+            };
+            match &event {
+                None => None,
+                Some(e) => tokio::task::block_in_place(|| this.process_event(&e))?,
+            }
+        };
+
+        match event {
+            // no response, recurse to wait on IO
+            None => self.poll_next(cx),
+            Some(res) => Poll::Ready(Some(Ok(res))),
+        }
+    }
+}
+
+impl Sink<XRequest> for XContext {
+    type Error = Error;
+
+    fn start_send(self: Pin<&mut Self>, item: XRequest) -> Result<(), Self::Error> {
+        let this = self.get_mut();
+
+        this.next_request = Some(item);
+
+        Ok(())
+    }
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+
+        match this.next_result.is_some() {
+            true => {
+                this.next_waker = Some(cx.waker().clone());
+                Poll::Pending
+            },
+            false => {
+                if let Some(req) = this.next_request.take() {
+                    // TODO: consider storing errors instead of returning them here
+                    this.next_result = tokio::task::block_in_place(|| this.process_request(&req))?;
+                    Poll::Ready(Ok(()))
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            },
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.poll_ready(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.state.running {
+            ready!(self.as_mut().poll_flush(cx))?;
+            self.stop();
+        }
+        Poll::Ready(Ok(()))
     }
 }

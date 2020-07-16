@@ -4,7 +4,6 @@ extern crate screenstub_x as x;
 extern crate input_linux as input;
 
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::{slice, iter};
 use input::{
     EventRef, EventMut, InputEvent, SynchronizeEvent, SynchronizeKind,
@@ -16,17 +15,18 @@ use x::{XState, XEvent, xcb};
 
 #[derive(Debug)]
 pub enum UserEvent {
+    Quit,
     ShowGuest,
     ShowHost,
     UnstickGuest,
     UnstickHost,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Hotkey<U> {
     triggers: Vec<Key>,
     modifiers: Vec<Key>,
-    events: Vec<Rc<U>>,
+    events: Vec<U>,
 }
 
 impl<U> Hotkey<U> {
@@ -34,7 +34,7 @@ impl<U> Hotkey<U> {
         Hotkey {
             triggers: triggers.into_iter().collect(),
             modifiers: modifiers.into_iter().collect(),
-            events: events.into_iter().map(Rc::new).collect(),
+            events: events.into_iter().collect(),
         }
     }
     pub fn keys(&self) -> iter::Cloned<iter::Chain<slice::Iter<Key>, slice::Iter<Key>>> {
@@ -47,8 +47,8 @@ pub struct Events<U> {
     xstate: XState,
     mouse_x: i16,
     mouse_y: i16,
-    triggers_press: HashMap<Key, Vec<Rc<Hotkey<U>>>>,
-    triggers_release: HashMap<Key, Vec<Rc<Hotkey<U>>>>,
+    triggers_press: HashMap<Key, Vec<Hotkey<U>>>,
+    triggers_release: HashMap<Key, Vec<Hotkey<U>>>,
     remap: HashMap<Key, Key>,
     keys: Bitmask<Key>,
 }
@@ -84,8 +84,7 @@ impl<U> Events<U> {
         }
     }
 
-    pub fn add_hotkey(&mut self, hotkey: Hotkey<U>, on_press: bool) {
-        let hotkey = Rc::new(hotkey);
+    pub fn add_hotkey(&mut self, hotkey: Hotkey<U>, on_press: bool) where U: Clone {
         for &key in &hotkey.triggers {
             if on_press {
                 &mut self.triggers_press
@@ -133,7 +132,7 @@ impl<U> Events<U> {
         e
     }
 
-    pub fn process_input_event(&mut self, e: &InputEvent) -> Vec<Rc<U>> {
+    pub fn process_input_event<'a>(&'a mut self, e: &InputEvent) -> Vec<&'a U> {
         match EventRef::new(e) {
             Ok(e) => self.process_input_event_(e),
             Err(err) => {
@@ -143,7 +142,7 @@ impl<U> Events<U> {
         }
     }
 
-    fn process_input_event_(&mut self, e: EventRef) -> Vec<Rc<U>> {
+    fn process_input_event_<'a>(&'a mut self, e: EventRef) -> Vec<&'a U> {
         match e {
             EventRef::Key(key) => {
                 let state = key.key_state();
@@ -163,7 +162,7 @@ impl<U> Events<U> {
                     hotkeys.iter()
                         .filter(|h| h.keys().all(|k| self.keys.get(k)))
                         .filter(|h| h.triggers.contains(&key.key))
-                        .flat_map(|h| h.events.iter().cloned())
+                        .flat_map(|h| h.events.iter())
                         .collect()
                 } else {
                     Default::default()
@@ -204,6 +203,9 @@ impl<U> Events<U> {
             XEvent::State(state) => {
                 self.xstate = state;
                 Default::default()
+            },
+            XEvent::Close => {
+                vec![UserEvent::Quit.into()]
             },
             XEvent::Visible(visible) => vec![if visible {
                 UserEvent::ShowGuest.into()
