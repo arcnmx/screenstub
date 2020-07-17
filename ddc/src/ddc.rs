@@ -5,14 +5,14 @@ use failure::Error;
 
 pub struct Monitor {
     display: Display,
-    inputs: Vec<u8>,
+    sources: Vec<u8>,
 }
 
 impl From<Display> for Monitor {
     fn from(display: Display) -> Self {
         Self {
             display,
-            inputs: Default::default(),
+            sources: Default::default(),
         }
     }
 }
@@ -63,23 +63,23 @@ impl DdcMonitor for Monitor {
         query.matches(&self.display.info)
     }
 
-    fn inputs(&mut self) -> Result<Vec<u8>, Self::Error> {
-        if self.inputs.is_empty() {
+    fn sources(&mut self) -> Result<Vec<u8>, Self::Error> {
+        if self.sources.is_empty() {
             let caps = self.display.handle.capabilities()?;
-            self.inputs = caps.vcp_features
+            self.sources = caps.vcp_features
                 .get(&FEATURE_CODE_INPUT)
                 .map(|desc| desc.values.iter().map(|(&value, _)| value).collect())
                 .unwrap_or_default();
         }
-        Ok(self.inputs.clone())
+        Ok(self.sources.clone())
     }
 
-    fn get_input(&mut self) -> Result<u8, Self::Error> {
+    fn get_source(&mut self) -> Result<u8, Self::Error> {
         self.display.handle.get_vcp_feature(FEATURE_CODE_INPUT)
             .map(|v| v.value() as u8)
     }
 
-    fn set_input(&mut self, value: u8) -> Result<(), Self::Error> {
+    fn set_source(&mut self, value: u8) -> Result<(), Self::Error> {
         self.display.handle.set_vcp_feature(FEATURE_CODE_INPUT, value as u16)
     }
 }

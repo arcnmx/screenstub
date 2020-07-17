@@ -14,9 +14,9 @@ pub struct ConfigScreen {
     #[serde(default)]
     pub monitor: ConfigMonitor,
     #[serde(default)]
-    pub guest_source: ConfigInput,
+    pub guest_source: ConfigSource,
     #[serde(default)]
-    pub host_source: ConfigInput,
+    pub host_source: ConfigSource,
 
     #[serde(default)]
     pub ddc: ConfigDdc,
@@ -281,22 +281,22 @@ pub struct ConfigMonitor {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct ConfigInput {
+pub struct ConfigSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<ConfigInputName>,
+    pub name: Option<ConfigSourceName>,
 }
 
-impl ConfigInput {
+impl ConfigSource {
     pub fn value(&self) -> Option<u8> {
-        self.value.or(self.name.as_ref().map(ConfigInputName::value))
+        self.value.or(self.name.as_ref().map(ConfigSourceName::value))
     }
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Serialize)]
 #[repr(u8)]
-pub enum ConfigInputName {
+pub enum ConfigSourceName {
     #[serde(rename = "Analog-1")]
     Analog1 = 0x01,
     #[serde(rename = "Analog-2")]
@@ -335,7 +335,7 @@ pub enum ConfigInputName {
     HDMI2 = 0x12,
 }
 
-impl fmt::Display for ConfigInputName {
+impl fmt::Display for ConfigSourceName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use serde::Serialize;
 
@@ -343,7 +343,7 @@ impl fmt::Display for ConfigInputName {
     }
 }
 
-impl ConfigInputName {
+impl ConfigSourceName {
     pub fn value(&self) -> u8 {
         *self as _
     }

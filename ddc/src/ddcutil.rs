@@ -169,7 +169,7 @@ impl DdcMonitor for Monitor {
         ).collect()
     }
 
-    fn inputs(&mut self) -> Result<Vec<u8>, Self::Error> {
+    fn sources(&mut self) -> Result<Vec<u8>, Self::Error> {
         self.to_display()?;
         match self {
             Monitor::Search(..) => Ok(Default::default()),
@@ -179,11 +179,11 @@ impl DdcMonitor for Monitor {
         }
     }
 
-    fn get_input(&mut self) -> Result<u8, Error> {
+    fn get_source(&mut self) -> Result<u8, Error> {
         Ok(self.display()?.vcp_get_value(FEATURE_CODE_INPUT)?.value() as u8)
     }
 
-    fn set_input(&mut self, value: u8) -> Result<(), Self::Error> {
+    fn set_source(&mut self, value: u8) -> Result<(), Self::Error> {
         self.display()?.vcp_set_simple(FEATURE_CODE_INPUT, value).map_err(From::from)
     }
 }

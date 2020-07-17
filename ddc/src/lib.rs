@@ -42,20 +42,20 @@ pub trait DdcMonitor: fmt::Display {
 
     fn enumerate() -> Result<Vec<Self>, Self::Error> where Self: Sized;
 
-    fn inputs(&mut self) -> Result<Vec<u8>, Self::Error>;
+    fn sources(&mut self) -> Result<Vec<u8>, Self::Error>;
 
-    fn get_input(&mut self) -> Result<u8, Self::Error>;
-    fn set_input(&mut self, value: u8) -> Result<(), Self::Error>;
+    fn get_source(&mut self) -> Result<u8, Self::Error>;
+    fn set_source(&mut self, value: u8) -> Result<(), Self::Error>;
 
-    fn find_guest_input(&mut self, our_input: u8) -> Result<Option<u8>, Self::Error> {
-        self.inputs()
-            .map(|inputs| find_guest_input(&inputs, our_input))
+    fn find_guest_source(&mut self, our_source: u8) -> Result<Option<u8>, Self::Error> {
+        self.sources()
+            .map(|sources| find_guest_source(&sources, our_source))
     }
 }
 
-pub fn find_guest_input(inputs: &[u8], our_input: u8) -> Option<u8> {
-    inputs.iter().copied()
-        .filter(|&value| value != our_input)
+pub fn find_guest_source(sources: &[u8], our_source: u8) -> Option<u8> {
+    sources.iter().copied()
+        .filter(|&value| value != our_source)
         .next()
 }
 
@@ -82,19 +82,19 @@ impl DdcMonitor for DummyMonitor {
         Err(Self::error())
     }
 
-    fn inputs(&mut self) -> Result<Vec<u8>, Self::Error> {
+    fn sources(&mut self) -> Result<Vec<u8>, Self::Error> {
         Err(Self::error())
     }
 
-    fn get_input(&mut self) -> Result<u8, Self::Error> {
+    fn get_source(&mut self) -> Result<u8, Self::Error> {
         Err(Self::error())
     }
 
-    fn set_input(&mut self, _value: u8) -> Result<(), Self::Error> {
+    fn set_source(&mut self, _value: u8) -> Result<(), Self::Error> {
         Err(Self::error())
     }
 
-    fn find_guest_input(&mut self, _our_input: u8) -> Result<Option<u8>, Self::Error> {
+    fn find_guest_source(&mut self, _our_source: u8) -> Result<Option<u8>, Self::Error> {
         Err(Self::error())
     }
 }

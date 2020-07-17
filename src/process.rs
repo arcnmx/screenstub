@@ -13,7 +13,7 @@ use qapi::qmp::{self, device_add, device_del, qom_list};
 use input::{self, InputEvent, RelativeAxis, InputId};
 use qemu::Qemu;
 use crate::filter::InputEventFilter;
-use crate::inputs::Inputs;
+use crate::sources::Sources;
 use crate::route::Route;
 use crate::grab::GrabEvdev;
 use crate::exec::exec;
@@ -42,7 +42,7 @@ pub struct Process {
     driver_absolute: ConfigQemuDriver,
     exit_events: Vec<config::ConfigEvent>,
     qemu: Arc<Qemu>,
-    inputs: Arc<Pin<Box<Inputs>>>,
+    sources: Arc<Pin<Box<Sources>>>,
     grabs: Arc<Mutex<HashMap<ConfigGrabMode, GrabHandle>>>,
     x_input_filter: Arc<Mutex<InputEventFilter>>,
     xreq_sender: un_mpsc::Sender<XRequest>,
@@ -59,7 +59,7 @@ enum InputDevice {
 }
 
 impl Process {
-    pub fn new(routing: ConfigQemuRouting, driver_keyboard: ConfigQemuDriver, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, exit_events: Vec<config::ConfigEvent>, qemu: Arc<Qemu>, inputs: Inputs, xreq_sender: un_mpsc::Sender<XRequest>, event_sender: un_mpsc::Sender<InputEvent>, error_sender: un_mpsc::Sender<Error>) -> Self {
+    pub fn new(routing: ConfigQemuRouting, driver_keyboard: ConfigQemuDriver, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, exit_events: Vec<config::ConfigEvent>, qemu: Arc<Qemu>, sources: Sources, xreq_sender: un_mpsc::Sender<XRequest>, event_sender: un_mpsc::Sender<InputEvent>, error_sender: un_mpsc::Sender<Error>) -> Self {
         Process {
             routing,
             driver_keyboard,
@@ -67,7 +67,7 @@ impl Process {
             driver_absolute,
             exit_events,
             qemu,
-            inputs: Arc::new(Box::pin(inputs)),
+            sources: Arc::new(Box::pin(sources)),
             grabs: Arc::new(Mutex::new(Default::default())),
             x_input_filter: Arc::new(Mutex::new(InputEventFilter::empty())),
             xreq_sender,
@@ -324,10 +324,10 @@ impl Process {
         info!("User event {:?}", event);
         match event {
             ConfigEvent::ShowHost => {
-                self.inputs.show_host().boxed()
+                self.sources.show_host().boxed()
             },
             ConfigEvent::ShowGuest => {
-                self.inputs.show_guest().boxed()
+                self.sources.show_guest().boxed()
             },
             ConfigEvent::Exec(args) => {
                 exec(args).into_future().boxed()
@@ -341,10 +341,10 @@ impl Process {
                 }
             },
             ConfigEvent::ToggleShow => {
-                if self.inputs.showing_guest() {
-                    self.inputs.show_host().boxed()
+                if self.sources.showing_guest() {
+                    self.sources.show_host().boxed()
                 } else {
-                    self.inputs.show_guest().boxed()
+                    self.sources.show_guest().boxed()
                 }
             },
             ConfigEvent::Grab(grab) => self.grab(grab),

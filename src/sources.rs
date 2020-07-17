@@ -3,16 +3,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use failure::{Error, format_err};
 use qemu::Qemu;
-use config::{ConfigInput, ConfigMonitor, ConfigDdcMethod};
+use config::{ConfigSource, ConfigMonitor, ConfigDdcMethod};
 use crate::exec::exec;
 use ddc::{SearchDisplay, DdcMonitor};
 
 type DynMonitor = dyn DdcMonitor<Error=Error> + Send;
 
-pub struct Inputs {
+pub struct Sources {
     qemu: Arc<Qemu>,
-    input_guest: Option<u8>,
-    input_host: Option<u8>,
+    source_guest: Option<u8>,
+    source_host: Option<u8>,
     showing_guest: Arc<AtomicBool>,
     host: Vec<Arc<ConfigDdcMethod>>,
     guest: Vec<Arc<ConfigDdcMethod>>,
@@ -30,12 +30,12 @@ fn convert_display(monitor: ConfigMonitor) -> SearchDisplay {
     }
 }
 
-impl Inputs {
-    pub fn new(qemu: Arc<Qemu>, display: ConfigMonitor, input_host: ConfigInput, input_guest: ConfigInput, host: Vec<ConfigDdcMethod>, guest: Vec<ConfigDdcMethod>) -> Self {
-        Inputs {
+impl Sources {
+    pub fn new(qemu: Arc<Qemu>, display: ConfigMonitor, source_host: ConfigSource, source_guest: ConfigSource, host: Vec<ConfigDdcMethod>, guest: Vec<ConfigDdcMethod>) -> Self {
+        Sources {
             qemu,
-            input_guest: input_guest.value(),
-            input_host: input_host.value(),
+            source_guest: source_guest.value(),
+            source_host: source_host.value(),
             showing_guest: Arc::new(AtomicBool::new(false)), // TODO: what if we start when it is showing?? use guest-exec to check if monitor is reachable?
             host: host.into_iter().map(Arc::new).collect(),
             guest: guest.into_iter().map(Arc::new).collect(),
@@ -48,22 +48,22 @@ impl Inputs {
         tokio::task::block_in_place(move || {
             let mut ddc = self.ddc.lock().unwrap();
             for method in &self.host {
-                if self.input_host.is_some() && self.input_guest.is_some() {
+                if self.source_host.is_some() && self.source_guest.is_some() {
                     break
                 }
                 let ddc = Self::ddc_connect(&mut ddc, method, &self.monitor)?;
-                let input_host = match self.input_host {
-                    Some(input) => input,
+                let source_host = match self.source_host {
+                    Some(source) => source,
                     None => {
-                        let input = ddc.get_input()?;
-                        self.input_host = Some(input);
-                        input
+                        let source = ddc.get_source()?;
+                        self.source_host = Some(source);
+                        source
                     },
                 };
-                match &self.input_guest {
+                match &self.source_guest {
                     Some(..) => (),
                     None =>
-                        self.input_guest = ddc.find_guest_input(input_host)?,
+                        self.source_guest = ddc.find_guest_source(source_host)?,
                 }
             }
 
@@ -76,18 +76,18 @@ impl Inputs {
             .map(drop).map_err(Error::from)
     }
 
-    fn map_input_arg<S: AsRef<str>>(s: S, input: Option<u8>, host: bool) -> Result<String, Error> {
-        let input = input
-            .ok_or_else(|| format_err!("DDC {} input source not found",
+    fn map_source_arg<S: AsRef<str>>(s: S, source: Option<u8>, host: bool) -> Result<String, Error> {
+        let source = source
+            .ok_or_else(|| format_err!("DDC {} source not found",
                 if host { "host" } else { "guest" }
             ));
         let s = s.as_ref();
         Ok(if s == "{}" {
-            format!("{}", input?)
+            format!("{}", source?)
         } else if s == "{:x}" {
-            format!("{:02x}", input?)
+            format!("{:02x}", source?)
         } else if s == "0x{:x}" {
-            format!("0x{:02x}", input?)
+            format!("0x{:02x}", source?)
         } else {
             s.to_owned()
         })
@@ -162,10 +162,10 @@ impl Inputs {
     }
 
     fn show_(&self, host: bool, method: Arc<ConfigDdcMethod>) -> impl Future<Output=Result<(), Error>> {
-        let input = if host {
-            &self.input_host
+        let source = if host {
+            &self.source_host
         } else {
-            &self.input_guest
+            &self.source_guest
         }.clone();
         let monitor = self.monitor.clone();
         let (ddc, qemu) = (
@@ -178,11 +178,11 @@ impl Inputs {
                 tokio::task::spawn_blocking(move || {
                     let mut ddc = ddc.lock().unwrap();
                     let ddc = Self::ddc_connect(&mut ddc, &method, &monitor)?;
-                    match input {
-                        Some(input) =>
-                            ddc.set_input(input),
+                    match source {
+                        Some(source) =>
+                            ddc.set_source(source),
                         None =>
-                            Err(format_err!("DDC {} input source not found",
+                            Err(format_err!("DDC {} source not found",
                                 if host { "host" } else { "guest" }
                             )),
                     }
@@ -191,14 +191,14 @@ impl Inputs {
             },
             ConfigDdcMethod::Exec(args) => {
                 let res = exec(args.iter()
-                    .map(|i| Self::map_input_arg(i, input, host))
+                    .map(|i| Self::map_source_arg(i, source, host))
                     .collect::<Result<Vec<_>, Error>>()?
                 ).into_future().await;
                 res
             },
             ConfigDdcMethod::GuestExec(args) => {
                 let res = qemu.guest_exec(args.iter()
-                    .map(|i| Self::map_input_arg(i, input, host))
+                    .map(|i| Self::map_source_arg(i, source, host))
                     .collect::<Result<Vec<_>, Error>>()?
                 ).into_future().await;
                 res.map(drop)

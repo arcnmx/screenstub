@@ -21,11 +21,11 @@ use failure::{Error, format_err};
 use log::{warn, error, trace};
 use clap::{Arg, App, SubCommand, AppSettings};
 use input::{InputId, Key, RelativeAxis, AbsoluteAxis, InputEvent, EventKind};
-use config::{Config, ConfigEvent, ConfigInputName};
+use config::{Config, ConfigEvent, ConfigSourceName};
 use event::{Hotkey, UserEvent, ProcessedXEvent};
 use qemu::Qemu;
 use route::Route;
-use inputs::Inputs;
+use sources::Sources;
 use process::Process;
 use ddc::{Monitor, DdcMonitor};
 use x::XRequest;
@@ -33,7 +33,7 @@ use x::XRequest;
 mod route;
 mod grab;
 mod filter;
-mod inputs;
+mod sources;
 mod exec;
 mod process;
 
@@ -67,13 +67,13 @@ async fn main_result() -> Result<i32, Error> {
             .about("Start the KVM with a fullscreen X window")
         ).subcommand(SubCommand::with_name("detect")
             .about("Detect available DDC/CI displays and their video inputs")
-        ).subcommand(SubCommand::with_name("input")
-            .about("Change the configured monitor input")
+        ).subcommand(SubCommand::with_name("source")
+            .about("Change the configured monitor input source")
             .arg(Arg::with_name("confirm")
                  .short("c")
                  .long("confirm")
                  .help("Check that the VM is running before switching input")
-            ).arg(Arg::with_name("input")
+            ).arg(Arg::with_name("source")
                 .value_name("DEST")
                 .takes_value(true)
                 .required(true)
@@ -125,8 +125,8 @@ async fn main_result() -> Result<i32, Error> {
 
             let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
 
-            let mut inputs = Inputs::new(qemu.clone(), config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
-            inputs.fill().await?;
+            let mut sources = Sources::new(qemu.clone(), config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
+            sources.fill().await?;
 
             let (mut event_sender, mut event_recv) = un_mpsc::channel(EVENT_BUFFER);
             let (error_sender, mut error_recv) = un_mpsc::channel(1);
@@ -138,7 +138,7 @@ async fn main_result() -> Result<i32, Error> {
             }
             let process = Process::new(
                 config.qemu.routing, config.qemu.keyboard_driver, config.qemu.relative_driver, config.qemu.absolute_driver, config.exit_events,
-                qemu.clone(), inputs, xreq_sender.clone(), event_sender.clone(), error_sender.clone(),
+                qemu.clone(), sources, xreq_sender.clone(), event_sender.clone(), error_sender.clone(),
             );
 
             process.devices_init().await?;
@@ -307,14 +307,14 @@ async fn main_result() -> Result<i32, Error> {
         },
         ("detect", Some(..)) => {
             Monitor::enumerate()?.into_iter().try_for_each(|mut m| {
-                let inputs = m.inputs()?;
-                let current_input = m.get_input()?;
+                let sources = m.sources()?;
+                let current_source = m.get_source()?;
                 println!("{}", m);
-                inputs.into_iter().for_each(|i|
-                    println!("  Input: {} = 0x{:02x}{}",
-                        ConfigInputName::from_value(i).map(|i| i.to_string()).unwrap_or("Unknown".into()),
+                sources.into_iter().for_each(|i|
+                    println!("  Source: {} = 0x{:02x}{}",
+                        ConfigSourceName::from_value(i).map(|i| i.to_string()).unwrap_or("Unknown".into()),
                         i,
-                        if i == current_input { " (Current)" } else { "" }
+                        if i == current_source { " (Active)" } else { "" }
                     )
                 );
 
@@ -323,16 +323,16 @@ async fn main_result() -> Result<i32, Error> {
 
             Ok(0)
         },
-        ("input", Some(matches)) => {
+        ("source", Some(matches)) => {
             let config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
 
             let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
-            let inputs = Inputs::new(qemu, config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
+            let sources = Sources::new(qemu, config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
 
-            match matches.value_of("input") {
-                Some("host") => inputs.show_host().await,
-                Some("guest") => inputs.show_guest().await, // TODO: bypass check for guest agent
-                _ => unreachable!("unknown input to switch to"),
+            match matches.value_of("source") {
+                Some("host") => sources.show_host().await,
+                Some("guest") => sources.show_guest().await,
+                _ => unreachable!("unknown source to switch to"),
             }.map(|_| 0)
         },
         _ => unreachable!("unknown command"),
