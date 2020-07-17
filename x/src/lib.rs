@@ -1,7 +1,6 @@
 pub extern crate xcb;
 
 use futures::{Sink, Stream, ready};
-use futures::stream::FusedStream;
 use failure::{Error, format_err};
 use tokio::io::Registration;
 use std::task::{Poll, Context, Waker};

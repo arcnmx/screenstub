@@ -5,7 +5,7 @@ use std::sync::{Mutex, Arc, Weak};
 use std::time::Duration;
 use std::future::Future;
 use failure::Error;
-use futures::{Stream, TryFutureExt, FutureExt, StreamExt, poll};
+use futures::{Stream, TryFutureExt, FutureExt, poll};
 use futures::future::{AbortHandle, abortable};
 use futures::stream::FusedStream;
 use tokio::net::UnixStream;

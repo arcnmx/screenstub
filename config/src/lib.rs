@@ -4,6 +4,7 @@ extern crate serde_derive;
 extern crate serde;
 
 use std::collections::HashMap;
+use std::fmt;
 use input::{Key, InputEvent, EventRef};
 
 pub type Config = Vec<ConfigScreen>;
@@ -34,53 +35,51 @@ pub struct ConfigScreen {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ConfigDdcHost {
-    None,
-    #[cfg(feature = "with-ddcutil")]
-    Libddcutil,
-    #[cfg(feature = "with-ddc")]
+pub enum ConfigDdcMethod {
     Ddc,
+    Libddcutil,
     Ddcutil,
     Exec(Vec<String>),
+    GuestExec(Vec<String>),
+    GuestWait,
 }
 
-impl Default for ConfigDdcHost {
-    #[cfg(feature = "with-ddcutil")]
-    fn default() -> Self {
-        ConfigDdcHost::Libddcutil
+impl ConfigDdcMethod {
+    #[cfg(all(not(feature = "with-ddc"), feature = "with-ddcutil"))]
+    fn default_host() -> Vec<Self> {
+        vec![ConfigDdcMethod::Libddcutil]
     }
 
     #[cfg(feature = "with-ddc")]
-    fn default() -> Self {
-        ConfigDdcHost::Ddc
+    fn default_host() -> Vec<Self> {
+        vec![ConfigDdcMethod::Ddc]
     }
 
     #[cfg(not(any(feature = "with-ddcutil", feature = "with-ddc")))]
+    fn default_host() -> Vec<Self> {
+        Vec::new()
+    }
+
+    fn default_guest() -> Vec<Self> {
+        Self::default_host()
+    }
+}
+
+impl Default for ConfigDdc {
     fn default() -> Self {
-        ConfigDdcHost::None
+        Self {
+            host: ConfigDdcMethod::default_host(),
+            guest: ConfigDdcMethod::default_guest(),
+        }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigDdcGuest {
-    None,
-    GuestExec(Vec<String>),
-    Exec(Vec<String>),
-}
-
-impl Default for ConfigDdcGuest {
-    fn default() -> Self {
-        ConfigDdcGuest::None
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ConfigDdc {
-    #[serde(default)]
-    pub host: ConfigDdcHost,
-    #[serde(default)]
-    pub guest: ConfigDdcGuest,
+    #[serde(default = "ConfigDdcMethod::default_host")]
+    pub host: Vec<ConfigDdcMethod>,
+    #[serde(default = "ConfigDdcMethod::default_guest")]
+    pub guest: Vec<ConfigDdcMethod>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -270,6 +269,8 @@ impl Default for ConfigGrabMode {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ConfigMonitor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manufacturer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -284,5 +285,75 @@ pub struct ConfigInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub name: Option<ConfigInputName>,
+}
+
+impl ConfigInput {
+    pub fn value(&self) -> Option<u8> {
+        self.value.or(self.name.as_ref().map(ConfigInputName::value))
+    }
+}
+
+#[derive(Debug, Copy, Clone, Deserialize, Serialize)]
+#[repr(u8)]
+pub enum ConfigInputName {
+    #[serde(rename = "Analog-1")]
+    Analog1 = 0x01,
+    #[serde(rename = "Analog-2")]
+    Analog2 = 0x02,
+    #[serde(rename = "DVI-1")]
+    DVI1 = 0x03,
+    #[serde(rename = "DVI-2")]
+    DVI2 = 0x04,
+    #[serde(rename = "Composite-1")]
+    Composite1 = 0x05,
+    #[serde(rename = "Composite-2")]
+    Composite2 = 0x06,
+    #[serde(rename = "S-video-1")]
+    SVideo1 = 0x07,
+    #[serde(rename = "S-video-2")]
+    SVideo2 = 0x08,
+    #[serde(rename = "Tuner-1")]
+    Tuner1 = 0x09,
+    #[serde(rename = "Tuner-2")]
+    Tuner2 = 0x0a,
+    #[serde(rename = "Tuner-3")]
+    Tuner3 = 0x0b,
+    #[serde(rename = "Component-1")]
+    Component1 = 0x0c,
+    #[serde(rename = "Component-2")]
+    Component2 = 0x0d,
+    #[serde(rename = "Component-3")]
+    Component3 = 0x0e,
+    #[serde(rename = "DisplayPort-1")]
+    DisplayPort1 = 0x0f,
+    #[serde(rename = "DisplayPort-2")]
+    DisplayPort2 = 0x10,
+    #[serde(rename = "HDMI-1")]
+    HDMI1 = 0x11,
+    #[serde(rename = "HDMI-2")]
+    HDMI2 = 0x12,
+}
+
+impl fmt::Display for ConfigInputName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", *self)
+    }
+}
+
+impl ConfigInputName {
+    pub fn value(&self) -> u8 {
+        *self as _
+    }
+
+    pub fn from_value(value: u8) -> Option<Self> {
+        match value {
+            1..=0x12 => Some(unsafe { Self::from_value_unchecked(value) }),
+            _ => None,
+        }
+    }
+
+    pub unsafe fn from_value_unchecked(value: u8) -> Self {
+        core::mem::transmute(value)
+    }
 }

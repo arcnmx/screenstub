@@ -15,21 +15,19 @@ use std::sync::Arc;
 use std::io::{self, Write};
 use futures::channel::{mpsc, oneshot};
 use futures::channel::mpsc as un_mpsc;
-use futures::{stream, future, TryFutureExt, FutureExt, StreamExt, SinkExt};
-use futures::stream::FusedStream;
+use futures::{future, TryFutureExt, FutureExt, StreamExt, SinkExt};
 use futures::lock::Mutex;
 use failure::{Error, format_err};
 use log::{warn, error, trace};
 use clap::{Arg, App, SubCommand, AppSettings};
 use input::{InputId, Key, RelativeAxis, AbsoluteAxis, InputEvent, EventKind};
-use config::{Config, ConfigEvent};
+use config::{Config, ConfigEvent, ConfigInputName};
 use event::{Hotkey, UserEvent, ProcessedXEvent};
 use qemu::Qemu;
 use route::Route;
 use inputs::Inputs;
 use process::Process;
-#[cfg(feature = "with-ddcutil")]
-use ddc::ddcutil::Monitor;
+use ddc::{Monitor, DdcMonitor};
 use x::XRequest;
 
 mod route;
@@ -127,7 +125,8 @@ async fn main_result() -> Result<i32, Error> {
 
             let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
 
-            let inputs = Inputs::new(qemu.clone(), config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
+            let mut inputs = Inputs::new(qemu.clone(), config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
+            inputs.fill().await?;
 
             let (mut event_sender, mut event_recv) = un_mpsc::channel(EVENT_BUFFER);
             let (error_sender, mut error_recv) = un_mpsc::channel(1);
@@ -306,25 +305,24 @@ async fn main_result() -> Result<i32, Error> {
 
             res.map(|()| 0)
         },
-        #[cfg(feature = "with-ddcutil")]
         ("detect", Some(..)) => {
-            Monitor::enumerate()?.into_iter().for_each(|m| {
-                let info = m.info().unwrap();
-                let inputs = m.inputs().unwrap();
-                let current_input = m.our_input().unwrap();
-                println!("Manufacturer: {}\nModel: {}\nSerial: {}",
-                    info.manufacturer_id(), info.model_name(), info.serial_number()
-                );
+            Monitor::enumerate()?.into_iter().try_for_each(|mut m| {
+                let inputs = m.inputs()?;
+                let current_input = m.get_input()?;
+                println!("{}", m);
                 inputs.into_iter().for_each(|i|
-                    println!("  Input: {} = 0x{:02x}{}", i.1, i.0,
-                        if *i.0 == current_input { " (Current)" } else { "" }
+                    println!("  Input: {} = 0x{:02x}{}",
+                        ConfigInputName::from_value(i).map(|i| i.to_string()).unwrap_or("Unknown".into()),
+                        i,
+                        if i == current_input { " (Current)" } else { "" }
                     )
                 );
-            });
+
+                Ok::<_, Error>(())
+            })?;
 
             Ok(0)
         },
-        #[cfg(feature = "with-ddcutil")]
         ("input", Some(matches)) => {
             let config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
 

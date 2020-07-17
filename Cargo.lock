@@ -834,7 +834,7 @@ dependencies = [
  "ddcutil 0.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "failure 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "failure_derive 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "mccs-db 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "mccs 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

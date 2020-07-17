@@ -11,14 +11,13 @@ use config::{ConfigEvent, ConfigGrab, ConfigGrabMode, ConfigInputEvent, ConfigQe
 use qapi::qga::{guest_shutdown, GuestShutdownMode};
 use qapi::qmp::{self, device_add, device_del, qom_list};
 use input::{self, InputEvent, RelativeAxis, InputId};
-use qemu::{Qemu, QemuStream, QemuEvents};
+use qemu::Qemu;
 use crate::filter::InputEventFilter;
 use crate::inputs::Inputs;
 use crate::route::Route;
 use crate::grab::GrabEvdev;
 use crate::exec::exec;
 use x::XRequest;
-use crate::EVENT_BUFFER;
 use log::{trace, info, error};
 use tokio::pin;
 

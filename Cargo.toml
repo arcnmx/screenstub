@@ -26,7 +26,7 @@ tokio-qapi = { version = "^0.4.0", features = ["qmp", "qga"] }
 [features]
 with-ddcutil = ["screenstub-ddc/with-ddcutil", "screenstub-config/with-ddcutil"]
 with-ddc = ["screenstub-ddc/with-ddc", "screenstub-config/with-ddc"]
-default = ["with-ddcutil"]
+default = ["with-ddc"]
 
 [patch.crates-io]
 tokio-qapi = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }

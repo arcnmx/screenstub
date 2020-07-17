@@ -1,16 +1,9 @@
 use std::collections::HashMap;
 use std::mem::replace;
+use std::fmt;
 use failure::Error;
-use ddcutil::{DisplayInfo, Display, FeatureInfo, FeatureCode};
-use crate::{DdcError, SearchDisplay, SearchInput};
-
-const FEATURE_CODE_INPUT: FeatureCode = 0x60;
-
-impl SearchInput {
-    fn is_empty(&self) -> bool {
-        self.value.is_none() && self.name.is_none()
-    }
-}
+use ddcutil::{DisplayInfo, Display, FeatureInfo};
+use crate::{DdcError, DdcMonitor, SearchDisplay, FEATURE_CODE_INPUT};
 
 impl SearchDisplay {
     pub fn matches(&self, info: &DisplayInfo) -> bool {
@@ -89,30 +82,6 @@ impl Monitor {
         ).unwrap_or(Vec::new())
     }
 
-    pub fn match_input(&self, search: &SearchInput) -> Option<u8> {
-        let def = Default::default();
-        let inputs = if search.is_empty() {
-            self.other_inputs()
-        } else {
-            self.inputs().unwrap_or(&def).iter().map(|(&v, s)| (v, &s[..])).collect()
-        };
-        inputs.iter().find(|&&(other_v, other_name)| {
-            if let Some(v) = search.value {
-                if other_v != v {
-                    return false
-                }
-            }
-
-            if let Some(ref name) = search.name {
-                if other_name != name {
-                    return false
-                }
-            }
-
-            true
-        }).map(|&(v, _)| v)
-    }
-
     pub fn from_display_info(info: DisplayInfo, search: Option<&mut SearchDisplay>) -> Result<Self, Error> {
         let display = info.open()?;
         let caps = display.capabilities()?;
@@ -176,13 +145,45 @@ impl Monitor {
             Monitor::Display { ref display, .. } => Ok(display),
         }
     }
+}
 
-    pub fn get_input(&mut self) -> Result<(u8, String), Error> {
-        let value = self.display()?.vcp_get_value(FEATURE_CODE_INPUT)?.value() as u8;
-        Ok((value, self.inputs().unwrap().get(&value).cloned().unwrap_or_else(|| "Unknown".into())))
+impl DdcMonitor for Monitor {
+    type Error = Error;
+
+    fn search(search: &SearchDisplay) -> Result<Option<Self>, Self::Error> where Self: Sized {
+        let mut res = Monitor::Search(search.clone());
+        res.to_display()?; // TODO: can't distinguish not found vs connection error
+        Ok(Some(res))
     }
 
-    pub fn set_input(&mut self, value: u8) -> Result<(), Error> {
+    fn matches(&self, search: &SearchDisplay) -> bool {
+        match self {
+            Monitor::Search(s) => s == search,
+            Monitor::Display { info, .. } => search.matches(info),
+        }
+    }
+
+    fn enumerate() -> Result<Vec<Self>, Self::Error> where Self: Sized {
+        DisplayInfo::enumerate()?.into_iter().map(|i|
+            Self::from_display_info(i, None)
+        ).collect()
+    }
+
+    fn inputs(&mut self) -> Result<Vec<u8>, Self::Error> {
+        self.to_display()?;
+        match self {
+            Monitor::Search(..) => Ok(Default::default()),
+            Monitor::Display { input_values, .. } => Ok(input_values
+                .iter().map(|(&value, _)| value).collect()
+            ),
+        }
+    }
+
+    fn get_input(&mut self) -> Result<u8, Error> {
+        Ok(self.display()?.vcp_get_value(FEATURE_CODE_INPUT)?.value() as u8)
+    }
+
+    fn set_input(&mut self, value: u8) -> Result<(), Self::Error> {
         self.display()?.vcp_set_simple(FEATURE_CODE_INPUT, value).map_err(From::from)
     }
 }
@@ -190,5 +191,17 @@ impl Monitor {
 impl Default for Monitor {
     fn default() -> Self {
         Self::new(Default::default())
+    }
+}
+
+impl fmt::Display for Monitor {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let info = match self {
+            Monitor::Display { info, .. } => info,
+            _ => return Err(fmt::Error),
+        };
+        writeln!(f, "Manufacturer: {}\nModel: {}\nSerial: {}",
+            info.manufacturer_id(), info.model_name(), info.serial_number()
+        )
     }
 }
