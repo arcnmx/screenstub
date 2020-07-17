@@ -337,7 +337,9 @@ pub enum ConfigInputName {
 
 impl fmt::Display for ConfigInputName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", *self)
+        use serde::Serialize;
+
+        self.serialize(f)
     }
 }
 
