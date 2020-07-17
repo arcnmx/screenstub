@@ -147,9 +147,13 @@ impl RouteUInput<dyn Fn(PathBuf) -> (String, qmp::object_add) + Send + Sync, dyn
 
 impl RouteUInput<dyn Fn(PathBuf) -> (String, qmp::device_add) + Send + Sync, dyn Fn(String) -> qmp::device_del + Send + Sync> {
     pub fn new_virtio_host(qemu: Arc<Qemu>, id: String, bus: Option<String>) -> Self {
+        let name = match bus.is_some() {
+            true => "virtio-input-host-device", // TODO: double-check this, what is the virtio bus for?
+            false => "virtio-input-host-pci",
+        };
         Self::new(qemu, uinput::Builder::new(), Arc::new(Box::new(move |path: PathBuf| {
             // TODO: should this be virtio-input-host-pci?
-            (id.clone(), qmp::device_add::new("virtio-input-host-device".into(), Some(id.clone()), bus.clone(), vec![
+            (id.clone(), qmp::device_add::new(name.into(), Some(id.clone()), bus.clone(), vec![
                 ("evdev".into(), Any::String(path.display().to_string())),
             ]))
         }) as Box<_>), Arc::new(Box::new(|id| {
