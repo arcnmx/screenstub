@@ -30,4 +30,7 @@ default = ["with-ddc"]
 
 [patch.crates-io]
 tokio-qapi = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
+qapi-codegen = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
+qapi-spec = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
+qapi-qmp = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
 input-linux = { git = "https://github.com/arcnmx/input-linux-rs.git" }

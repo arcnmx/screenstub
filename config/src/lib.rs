@@ -1,11 +1,11 @@
 extern crate input_linux as input;
-#[macro_use]
-extern crate serde_derive;
-extern crate serde;
 
 use std::collections::HashMap;
 use std::fmt;
+use serde::{Serialize, Deserialize};
 use input::{Key, InputEvent, EventRef};
+
+pub mod keymap;
 
 pub type Config = Vec<ConfigScreen>;
 
@@ -337,8 +337,6 @@ pub enum ConfigSourceName {
 
 impl fmt::Display for ConfigSourceName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use serde::Serialize;
-
         self.serialize(f)
     }
 }

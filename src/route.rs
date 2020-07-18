@@ -7,22 +7,25 @@ use futures::channel::mpsc as un_mpsc;
 use futures::{StreamExt, SinkExt, FutureExt};
 use failure::{Error, format_err};
 use config::ConfigQemuRouting;
+use config::keymap::Keymaps;
 use qapi::{qmp, Any, Command};
 use qemu::Qemu;
 use uinput;
 
 pub struct RouteQmp {
     qemu: Arc<Qemu>,
+    qkeycodes: Arc<[u8]>,
 }
 
 impl RouteQmp {
     pub fn new(qemu: Arc<Qemu>) -> Self {
         RouteQmp {
             qemu,
+            qkeycodes: Keymaps::from_csv().qnum_keycodes().into(),
         }
     }
 
-    fn convert_event(e: &InputEvent) -> Option<qmp::InputEvent> {
+    fn convert_event(e: &InputEvent, qkeycodes: &[u8]) -> Option<qmp::InputEvent> {
         Some(match EventRef::new(e) {
             Ok(EventRef::Key(ref key)) if key.key.is_button() => qmp::InputEvent::btn {
                 data: qmp::InputBtnEvent {
@@ -41,11 +44,14 @@ impl RouteQmp {
             },
             Ok(EventRef::Key(KeyEvent { key: Key::Reserved, .. })) =>
                 return None, // ignore key 0 events
-            Ok(EventRef::Key(ref key)) => qmp::InputEvent::key {
-                data: qmp::InputKeyEvent {
-                    down: key.key_state() == KeyState::Pressed,
-                    key: qmp::KeyValue::number { data: key.key as _ },
+            Ok(EventRef::Key(ref key)) => match qkeycodes.get(key.key as usize) {
+                Some(&qnum) => qmp::InputEvent::key {
+                    data: qmp::InputKeyEvent {
+                        down: key.key_state() == KeyState::Pressed,
+                        key: qmp::KeyValue::number { data: qnum as _ },
+                    },
                 },
+                None => return None,
             },
             Ok(EventRef::Relative(rel)) => qmp::InputEvent::rel {
                 data: qmp::InputMoveEvent {
@@ -71,12 +77,13 @@ impl RouteQmp {
         })
     }
 
-    fn convert_events<I: IntoIterator<Item=InputEvent>>(e: I) -> impl Iterator<Item=qmp::InputEvent> {
-        e.into_iter().map(|ref e| Self::convert_event(e)).filter_map(|e| e)
+    fn convert_events<'a, I: IntoIterator<Item=InputEvent> + 'a>(e: I, qkeycodes: &'a [u8]) -> impl Iterator<Item=qmp::InputEvent> + 'a {
+        e.into_iter().map(move |ref e| Self::convert_event(e, qkeycodes)).filter_map(|e| e)
     }
 
     pub fn spawn(&self, mut events: un_mpsc::Receiver<InputEvent>, mut error_sender: un_mpsc::Sender<Error>) {
         let qemu = self.qemu.clone();
+        let qkeycodes = self.qkeycodes.clone();
         tokio::spawn(async move {
             let qmp = qemu.qmp_clone().await?;
             let mut cmd = qmp::input_send_event {
@@ -87,11 +94,11 @@ impl RouteQmp {
             'outer: while let Some(event) = events.next().await {
                 const THRESHOLD: usize = 0x20;
                 cmd.events.clear();
-                cmd.events.extend(RouteQmp::convert_events(iter::once(event)));
+                cmd.events.extend(RouteQmp::convert_events(iter::once(event), &qkeycodes));
                 while let Poll::Ready(event) = futures::poll!(events.next()) {
                     match event {
                         Some(event) =>
-                            cmd.events.extend(RouteQmp::convert_events(iter::once(event))),
+                            cmd.events.extend(RouteQmp::convert_events(iter::once(event), &qkeycodes)),
                         None => break 'outer,
                     }
                     if cmd.events.len() > THRESHOLD {
@@ -99,7 +106,7 @@ impl RouteQmp {
                     }
                 }
                 if !cmd.events.is_empty() {
-                    qmp.execute::<_, qmp::input_send_event>(&cmd).await??;
+                    qmp.execute::<qmp::input_send_event, _>(&cmd).await??;
                 }
             }
             Ok(())
