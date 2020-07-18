@@ -330,8 +330,8 @@ async fn main_result() -> Result<i32, Error> {
             let sources = Sources::new(qemu, config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
 
             match matches.value_of("source") {
-                Some("host") => sources.show_host().await,
-                Some("guest") => sources.show_guest().await,
+                Some("host") => sources.show(true, true).await,
+                Some("guest") => sources.show(false, true).await,
                 _ => unreachable!("unknown source to switch to"),
             }.map(|_| 0)
         },

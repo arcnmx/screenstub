@@ -98,11 +98,11 @@ impl Sources {
     }
 
     pub fn show_guest(&self) -> impl Future<Output=Result<(), Error>> {
-        self.show(false)
+        self.show(false, false)
     }
 
     pub fn show_host(&self) -> impl Future<Output=Result<(), Error>> {
-        self.show(true)
+        self.show(true, false)
     }
 
     fn ddc_connect<'a>(ddc: &'a mut Option<Box<DynMonitor>>, method: &ConfigDdcMethod, monitor: &SearchDisplay) -> Result<&'a mut Box<DynMonitor>, Error> {
@@ -136,8 +136,8 @@ impl Sources {
         }
     }
 
-    pub fn show(&self, host: bool) -> impl Future<Output=Result<(), Error>> {
-        let methods: Vec<_> = if self.showing_guest() != host {
+    pub fn show(&self, host: bool, force: bool) -> impl Future<Output=Result<(), Error>> {
+        let methods: Vec<_> = if !force && self.showing_guest() != host {
             Vec::new()
         } else {
             let methods = if host {
