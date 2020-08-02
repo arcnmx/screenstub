@@ -28,6 +28,16 @@ with-ddcutil = ["screenstub-ddc/with-ddcutil", "screenstub-config/with-ddcutil"]
 with-ddc = ["screenstub-ddc/with-ddc", "screenstub-config/with-ddc"]
 default = ["with-ddc"]
 
+[workspace]
+members = [
+	"config",
+	"uinput",
+	"event",
+	"qemu",
+	"ddc",
+	"x",
+]
+
 [patch.crates-io]
 qapi = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
 qapi-codegen = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }

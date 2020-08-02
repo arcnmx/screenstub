@@ -15,8 +15,3 @@ qapi-qmp = { version = "^0.4.0" }
 [features]
 with-ddcutil = []
 with-ddc = []
-
-[patch.crates-io]
-qapi-codegen = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
-qapi-spec = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
-qapi-qmp = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }

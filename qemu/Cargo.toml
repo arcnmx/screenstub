@@ -9,6 +9,3 @@ failure = "^0.1.1"
 log = "^0.4.1"
 tokio = { version = "^0.2.0", default-features = false, features = ["time", "sync"] }
 qapi = { version = "^0.4.1", features = ["qmp", "qga", "async-tokio-uds", "async-tokio-spawn"] }
-
-[patch.crates-io]
-qapi = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
