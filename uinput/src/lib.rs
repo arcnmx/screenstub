@@ -56,7 +56,7 @@ impl Builder {
     }
 
     pub fn absolute_axis(&mut self, setup: AbsoluteInfoSetup) -> &mut Self {
-        self.bits_abs.set(setup.axis);
+        self.bits_abs.insert(setup.axis);
         self.abs.push(setup);
 
         self
@@ -64,9 +64,9 @@ impl Builder {
 
     pub fn x_config_rel(&mut self) -> &mut Self {
         self.x_config_button();
-        self.bits_events.set(EventKind::Relative);
+        self.bits_events.insert(EventKind::Relative);
         for &axis in &[RelativeAxis::X, RelativeAxis::Y, RelativeAxis::Wheel, RelativeAxis::HorizontalWheel] {
-            self.bits_rel.set(axis);
+            self.bits_rel.insert(axis);
         }
 
         self
@@ -74,7 +74,7 @@ impl Builder {
 
     pub fn x_config_abs(&mut self) -> &mut Self {
         self.x_config_button();
-        self.bits_events.set(EventKind::Absolute);
+        self.bits_events.insert(EventKind::Absolute);
         for &axis in &[AbsoluteAxis::X, AbsoluteAxis::Y] {
             self.absolute_axis(AbsoluteInfoSetup {
                 axis,
@@ -85,26 +85,26 @@ impl Builder {
                 },
             });
         }
-        self.bits_events.set(EventKind::Relative);
+        self.bits_events.insert(EventKind::Relative);
         for &axis in &[RelativeAxis::Wheel, RelativeAxis::HorizontalWheel] {
-            self.bits_rel.set(axis);
+            self.bits_rel.insert(axis);
         }
 
         self
     }
 
     pub fn x_config_button(&mut self) -> &mut Self {
-        self.bits_events.set(EventKind::Key);
+        self.bits_events.insert(EventKind::Key);
         self.bits_keys.or(Key::iter().filter(|k| k.is_button()));
 
         self
     }
 
     pub fn x_config_key(&mut self, repeat: bool) -> &mut Self {
-        self.bits_events.set(EventKind::Key);
+        self.bits_events.insert(EventKind::Key);
         if repeat {
             // autorepeat is undesired, the VM will have its own implementation
-            self.bits_events.set(EventKind::Autorepeat); // kernel should handle this for us as long as it's set
+            self.bits_events.insert(EventKind::Autorepeat); // kernel should handle this for us as long as it's set
         }
         self.bits_keys.or(Key::iter().filter(|k| k.is_key()));
 
@@ -112,14 +112,14 @@ impl Builder {
     }
 
     pub fn from_evdev<F: AsRawFd>(&mut self, evdev: &input_linux::EvdevHandle<F>) -> io::Result<&mut Self> {
-        evdev.device_properties()?.iter().for_each(|bit| self.bits_props.set(bit));
-        evdev.event_bits()?.iter().for_each(|bit| self.bits_events.set(bit));
-        evdev.key_bits()?.iter().for_each(|bit| self.bits_keys.set(bit));
-        evdev.relative_bits()?.iter().for_each(|bit| self.bits_rel.set(bit));
-        evdev.misc_bits()?.iter().for_each(|bit| self.bits_misc.set(bit));
-        evdev.led_bits()?.iter().for_each(|bit| self.bits_led.set(bit));
-        evdev.sound_bits()?.iter().for_each(|bit| self.bits_sound.set(bit));
-        evdev.switch_bits()?.iter().for_each(|bit| self.bits_switch.set(bit));
+        evdev.device_properties()?.iter().for_each(|bit| self.bits_props.insert(bit));
+        evdev.event_bits()?.iter().for_each(|bit| self.bits_events.insert(bit));
+        evdev.key_bits()?.iter().for_each(|bit| self.bits_keys.insert(bit));
+        evdev.relative_bits()?.iter().for_each(|bit| self.bits_rel.insert(bit));
+        evdev.misc_bits()?.iter().for_each(|bit| self.bits_misc.insert(bit));
+        evdev.led_bits()?.iter().for_each(|bit| self.bits_led.insert(bit));
+        evdev.sound_bits()?.iter().for_each(|bit| self.bits_sound.insert(bit));
+        evdev.switch_bits()?.iter().for_each(|bit| self.bits_switch.insert(bit));
 
         // TODO: FF bits?
 

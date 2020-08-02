@@ -1,17 +1,14 @@
-#[macro_use]
-extern crate log;
-extern crate screenstub_x as x;
-extern crate input_linux as input;
-
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::{slice, iter};
-use input::{
-    EventRef, EventMut, InputEvent, SynchronizeEvent, SynchronizeKind,
+use smallvec::{SmallVec, smallvec};
+use input_linux::{
+    EventRef, EventMut, InputEvent, SynchronizeEvent,
     KeyEvent, Key, KeyState,
-    AbsoluteEvent, AbsoluteAxis,
     Bitmask,
 };
-use x::{XState, XEvent, xcb};
+use log::warn;
+use screenstub_x::XEvent;
 
 #[derive(Debug)]
 pub enum UserEvent {
@@ -37,6 +34,7 @@ impl<U> Hotkey<U> {
             events: events.into_iter().collect(),
         }
     }
+
     pub fn keys(&self) -> iter::Cloned<iter::Chain<slice::Iter<Key>, slice::Iter<Key>>> {
         self.triggers.iter().chain(self.modifiers.iter()).cloned()
     }
@@ -44,13 +42,10 @@ impl<U> Hotkey<U> {
 
 #[derive(Debug)]
 pub struct Events<U> {
-    xstate: XState,
-    mouse_x: i16,
-    mouse_y: i16,
     triggers_press: HashMap<Key, Vec<Hotkey<U>>>,
     triggers_release: HashMap<Key, Vec<Hotkey<U>>>,
     remap: HashMap<Key, Key>,
-    keys: Bitmask<Key>,
+    keys: Mutex<Bitmask<Key>>,
 }
 
 #[derive(Debug)]
@@ -74,9 +69,6 @@ impl<I: Into<InputEvent>> From<I> for ProcessedXEvent {
 impl<U> Events<U> {
     pub fn new() -> Self {
         Events {
-            xstate: Default::default(),
-            mouse_x: -1,
-            mouse_y: -1,
             triggers_press: Default::default(),
             triggers_release: Default::default(),
             remap: Default::default(),
@@ -98,30 +90,7 @@ impl<U> Events<U> {
         self.remap.insert(from, to);
     }
 
-    pub fn x_button(&self, button: xcb::Button) -> Option<Key> {
-        match button as _ {
-            xcb::BUTTON_INDEX_1 => Some(Key::ButtonLeft),
-            xcb::BUTTON_INDEX_2 => Some(Key::ButtonMiddle),
-            xcb::BUTTON_INDEX_3 => Some(Key::ButtonRight),
-            xcb::BUTTON_INDEX_4 => Some(Key::ButtonGearUp),
-            xcb::BUTTON_INDEX_5 => Some(Key::ButtonWheel), // Key::ButtonGearDown
-            // also map Key::ButtonSide, Key::ButtonExtra? qemu input-linux doesn't support fwd/back, but virtio probably does
-            _ => None,
-        }
-    }
-
-    pub fn x_keycode(&self, key: xcb::Keycode) -> Option<Key> {
-        match Key::from_code(key as _) {
-            Ok(code) => Some(code),
-            Err(..) => None,
-        }
-    }
-
-    pub fn x_keysym(&self, _key: xcb::Keysym) -> Option<Key> {
-        unimplemented!()
-    }
-
-    pub fn map_input_event(&mut self, mut e: InputEvent) -> InputEvent {
+    pub fn map_input_event(&self, mut e: InputEvent) -> InputEvent {
         match EventMut::new(&mut e) {
             Ok(EventMut::Key(key)) => if let Some(remap) = self.remap.get(&key.key) {
                 key.key = *remap;
@@ -132,7 +101,7 @@ impl<U> Events<U> {
         e
     }
 
-    pub fn process_input_event<'a>(&'a mut self, e: &InputEvent) -> Vec<&'a U> {
+    pub fn process_input_event<'a>(&'a self, e: &InputEvent) -> Vec<&'a U> {
         match EventRef::new(e) {
             Ok(e) => self.process_input_event_(e),
             Err(err) => {
@@ -142,25 +111,26 @@ impl<U> Events<U> {
         }
     }
 
-    fn process_input_event_<'a>(&'a mut self, e: EventRef) -> Vec<&'a U> {
+    fn process_input_event_<'a>(&'a self, e: EventRef) -> Vec<&'a U> {
         match e {
             EventRef::Key(key) => {
-                let state = key.key_state();
+                let state = key.value;
 
                 let hotkeys = match state {
-                    KeyState::Pressed => self.triggers_press.get(&key.key),
-                    KeyState::Released => self.triggers_release.get(&key.key),
+                    KeyState::PRESSED => self.triggers_press.get(&key.key),
+                    KeyState::RELEASED => self.triggers_release.get(&key.key),
                     _ => None,
                 };
 
+                let mut keys = self.keys.lock().unwrap();
                 match state {
-                    KeyState::Pressed => self.keys.set(key.key),
+                    KeyState::PRESSED => keys.insert(key.key),
                     _ => (),
                 }
 
                 let events = if let Some(hotkeys) = hotkeys {
                     hotkeys.iter()
-                        .filter(|h| h.keys().all(|k| self.keys.get(k)))
+                        .filter(|h| h.keys().all(|k| keys.get(k)))
                         .filter(|h| h.triggers.contains(&key.key))
                         .flat_map(|h| h.events.iter())
                         .collect()
@@ -169,8 +139,8 @@ impl<U> Events<U> {
                 };
 
                 match state {
-                    KeyState::Pressed => (),
-                    KeyState::Released => self.keys.clear(key.key),
+                    KeyState::PRESSED => (),
+                    KeyState::RELEASED => keys.remove(key.key),
                     state => warn!("Unknown key state {:?}", state),
                 }
 
@@ -180,102 +150,44 @@ impl<U> Events<U> {
         }
     }
 
-    fn sync_report() -> InputEvent {
-        SynchronizeEvent::new(Default::default(), SynchronizeKind::Report, 0).into()
-    }
-
-    fn key_state(pressed: bool) -> i32 {
-        match pressed {
-            true => KeyState::Pressed.into(),
-            false => KeyState::Released.into(),
-        }
-    }
-
-    fn key_event(key: Key, pressed: bool) -> Vec<ProcessedXEvent> {
-        vec![
-            KeyEvent::new(Default::default(), key, Self::key_state(pressed)).into(),
-            Self::sync_report().into(),
-        ]
-    }
-
-    pub fn process_x_event(&mut self, e: &XEvent) -> Vec<ProcessedXEvent> {
+    pub fn process_x_event(&self, e: &XEvent) -> impl Iterator<Item=ProcessedXEvent> {
         match *e {
-            XEvent::State(state) => {
-                self.xstate = state;
-                Default::default()
-            },
-            XEvent::Close => {
-                vec![UserEvent::Quit.into()]
-            },
-            XEvent::Visible(visible) => vec![if visible {
+            XEvent::Close =>
+                smallvec![UserEvent::Quit.into()],
+            XEvent::Visible(visible) => smallvec![if visible {
                 UserEvent::ShowGuest.into()
             } else {
                 UserEvent::ShowHost.into()
             }],
             XEvent::Focus(focus) => if !focus {
-                vec![UserEvent::UnstickGuest.into()] // TODO: wtf just generate the events here!!
+                self.unstick_guest_()
             } else {
                 Default::default()
             },
-            XEvent::UnstickGuest => {
-                let res = self.unstick_events().map(From::from).collect();
-                self.keys = Default::default();
-                res
+            XEvent::Input(e) => {
+                smallvec![e.into()]
             },
-            XEvent::Mouse { x, y } => {
-                let events = [
-                    (self.xstate.width, self.mouse_x, x, AbsoluteAxis::X),
-                    (self.xstate.height, self.mouse_y, y, AbsoluteAxis::Y),
-                ].iter()
-                    .filter(|&&(dim, old, new, _)| old != new && dim != 0)
-                    .map(|&(dim, _, new, axis)| (
-                        dim,
-                        if new < 0 {
-                            0
-                        } else if new as u16 > dim {
-                            dim as _
-                        } else {
-                            new
-                        },
-                        axis
-                    )).map(|(dim, new, axis)| AbsoluteEvent::new(
-                        Default::default(),
-                        axis,
-                        new as i32 * 0x8000 / dim as i32,
-                    ).into())
-                    .chain(iter::once(Self::sync_report().into()))
-                    .collect();
-
-                self.mouse_x = x;
-                self.mouse_y = y;
-
-                events
-            },
-            XEvent::Button { pressed, button, .. } => {
-                if let Some(button) = self.x_button(button) {
-                    Self::key_event(button, pressed)
-                } else {
-                    warn!("unknown X button {}", button);
-                    Default::default()
-                }
-            },
-            XEvent::Key { pressed, keycode, keysym, .. } => {
-                if let Some(key) = self.x_keycode(keycode) { // TODO: keysym?
-                    Self::key_event(key, pressed)
-                } else {
-                    warn!("unknown X keycode {} keysym {:?}", keycode, keysym);
-                    Default::default()
-                }
-            },
-        }
+        }.into_iter()
     }
 
-    pub fn unstick_events(&self) -> iter::Chain<iter::Map<input::bitmask::BitmaskIterator<Key>, fn(Key) -> InputEvent>, iter::Once<InputEvent>> {
-        fn key_event(key: Key) -> InputEvent {
-            KeyEvent::new(Default::default(), key, Events::<()>::key_state(false)).into()
-        }
+    fn unstick_events_<'a>(keys: &'a Bitmask<Key>) -> impl Iterator<Item=InputEvent> + 'a {
+        keys.iter().map(|key|
+            KeyEvent::new(Default::default(), key, KeyState::RELEASED).into()
+        ).chain(iter::once(SynchronizeEvent::report(Default::default()).into()))
+    }
 
-        self.keys.iter().map(key_event as _)
-            .chain(iter::once(Self::sync_report()))
+    pub fn unstick_guest(&self) -> impl Iterator<Item=InputEvent> + Send {
+        let mut keys = self.keys.lock().unwrap();
+        let res: SmallVec<[InputEvent; 4]> = Self::unstick_events_(&keys).collect();
+        keys.clear();
+        res.into_iter()
+    }
+
+    fn unstick_guest_(&self) -> SmallVec<[ProcessedXEvent; 4]> {
+        // sad duplicate because it seems slightly more efficient :(
+        let mut keys = self.keys.lock().unwrap();
+        let res = Self::unstick_events_(&keys).map(From::from).collect();
+        keys.clear();
+        res
     }
 }

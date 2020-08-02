@@ -1,16 +1,20 @@
 use std::sync::Arc;
-use std::path::PathBuf;
+use std::path::Path;
 use std::task::Poll;
+use std::time::Duration;
+use std::sync::Once;
+use std::pin::Pin;
 use std::iter;
-use input::{InputEvent, EventRef, KeyEvent, Key, KeyState, RelativeAxis, AbsoluteAxis};
-use futures::channel::mpsc as un_mpsc;
-use futures::{StreamExt, SinkExt, FutureExt};
+use input::{InputEvent, EventRef, KeyEvent, Key, RelativeAxis, AbsoluteAxis};
+use futures::channel::mpsc;
+use futures::{StreamExt, SinkExt, Future, FutureExt, TryFutureExt};
 use failure::{Error, format_err};
 use config::ConfigQemuRouting;
 use config::keymap::Keymaps;
-use qapi::{qmp, Any, Command};
+use qapi::{qmp, Any};
 use qemu::Qemu;
 use uinput;
+use log::warn;
 
 pub struct RouteQmp {
     qemu: Arc<Qemu>,
@@ -19,9 +23,18 @@ pub struct RouteQmp {
 
 impl RouteQmp {
     pub fn new(qemu: Arc<Qemu>) -> Self {
+        let qkeycodes = unsafe {
+            static mut QKEYCODES: Option<Arc<[u8]>> = None;
+            static QKEYCODES_ONCE: Once = Once::new();
+
+            QKEYCODES_ONCE.call_once(|| {
+                QKEYCODES = Some(Keymaps::from_csv().qnum_keycodes().into());
+            });
+            QKEYCODES.as_ref().unwrap().clone()
+        };
         RouteQmp {
             qemu,
-            qkeycodes: Keymaps::from_csv().qnum_keycodes().into(),
+            qkeycodes,
         }
     }
 
@@ -29,7 +42,7 @@ impl RouteQmp {
         Some(match EventRef::new(e) {
             Ok(EventRef::Key(ref key)) if key.key.is_button() => qmp::InputEvent::btn {
                 data: qmp::InputBtnEvent {
-                    down: key.key_state() == KeyState::Pressed,
+                    down: key.value.is_pressed(),
                     button: match key.key {
                         Key::ButtonLeft => qmp::InputButton::left,
                         Key::ButtonMiddle => qmp::InputButton::middle,
@@ -47,7 +60,7 @@ impl RouteQmp {
             Ok(EventRef::Key(ref key)) => match qkeycodes.get(key.key as usize) {
                 Some(&qnum) => qmp::InputEvent::key {
                     data: qmp::InputKeyEvent {
-                        down: key.key_state() == KeyState::Pressed,
+                        down: key.value.is_pressed(),
                         key: qmp::KeyValue::number { data: qnum as _ },
                     },
                 },
@@ -81,11 +94,11 @@ impl RouteQmp {
         e.into_iter().map(move |ref e| Self::convert_event(e, qkeycodes)).filter_map(|e| e)
     }
 
-    pub fn spawn(&self, mut events: un_mpsc::Receiver<InputEvent>, mut error_sender: un_mpsc::Sender<Error>) {
+    pub fn spawn(&self, mut events: mpsc::Receiver<InputEvent>, mut error_sender: mpsc::Sender<Error>) {
         let qemu = self.qemu.clone();
         let qkeycodes = self.qkeycodes.clone();
         tokio::spawn(async move {
-            let qmp = qemu.qmp_clone().await?;
+            let qmp = qemu.connect_qmp().await?;
             let mut cmd = qmp::input_send_event {
                 device: Default::default(),
                 head: Default::default(),
@@ -106,7 +119,12 @@ impl RouteQmp {
                     }
                 }
                 if !cmd.events.is_empty() {
-                    qmp.execute::<qmp::input_send_event, _>(&cmd).await??;
+                    match qmp.execute(&cmd).await {
+                        Ok(_) => (),
+                        Err(qapi::ExecuteError::Qapi(e)) if matches!(e.class, qapi::ErrorClass::GenericError) =>
+                            warn!("QMP input routing error: {:?}", e),
+                        Err(e) => return Err(e.into()),
+                    }
                 }
             }
             Ok(())
@@ -119,91 +137,135 @@ impl RouteQmp {
     }
 }
 
-pub struct RouteUInput<F: ?Sized, D: ?Sized> {
+pub struct RouteUInput<U> {
     qemu: Arc<Qemu>,
     builder: uinput::Builder,
-    create: Arc<Box<F>>,
-    delete: Arc<Box<D>>,
+    commands: Arc<U>,
 }
 
-impl<F: ?Sized, D: ?Sized> RouteUInput<F, D> {
+impl<U> RouteUInput<U> {
     pub fn builder(&mut self) -> &mut uinput::Builder {
         &mut self.builder
     }
 }
 
-impl RouteUInput<dyn Fn(PathBuf) -> (String, qmp::object_add) + Send + Sync, dyn Fn(String) -> qmp::object_del + Send + Sync> {
+impl RouteUInput<RouteUInputInputLinux> {
     pub fn new_input_linux(qemu: Arc<Qemu>, id: String, repeat: bool) -> Self {
-        Self::new(qemu, uinput::Builder::new(), Arc::new(Box::new(move |path: PathBuf| {
-            let path = path.display();
-            (id.clone(), qmp::object_add {
-                id: id.clone(),
-                qom_type: "input-linux".into(),
-                props: Some(vec![
-                    ("evdev".into(), Any::String(path.to_string())),
-                    ("repeat".into(), Any::Bool(repeat)),
-                ].into_iter().collect()),
-            })
-        }) as Box<_>), Arc::new(Box::new(|id| {
-            qmp::object_del {
-                id,
-            }
-        }) as Box<_>))
+        Self::new(qemu, uinput::Builder::new(), RouteUInputInputLinux {
+            id,
+            repeat,
+        })
     }
 }
 
-impl RouteUInput<dyn Fn(PathBuf) -> (String, qmp::device_add) + Send + Sync, dyn Fn(String) -> qmp::device_del + Send + Sync> {
+impl RouteUInput<RouteUInputVirtio> {
     pub fn new_virtio_host(qemu: Arc<Qemu>, id: String, bus: Option<String>) -> Self {
-        let name = match bus.is_some() {
+        Self::new(qemu, uinput::Builder::new(), RouteUInputVirtio {
+            id,
+            bus,
+        })
+    }
+}
+
+pub trait UInputCommands: Send + Sync + 'static {
+    fn command_create(&self, qemu: &Arc<Qemu>, path: &Path) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>>;
+    fn command_delete(&self, qemu: &Arc<Qemu>) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>>;
+}
+
+pub struct RouteUInputVirtio {
+    id: String,
+    bus: Option<String>,
+}
+
+impl UInputCommands for RouteUInputVirtio {
+    fn command_create(&self, qemu: &Arc<Qemu>, path: &Path) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
+        let name = match self.bus.is_some() {
             true => "virtio-input-host-device", // TODO: double-check this, what is the virtio bus for?
             false => "virtio-input-host-pci",
         };
-        Self::new(qemu, uinput::Builder::new(), Arc::new(Box::new(move |path: PathBuf| {
-            // TODO: should this be virtio-input-host-pci?
-            (id.clone(), qmp::device_add::new(name.into(), Some(id.clone()), bus.clone(), vec![
-                ("evdev".into(), Any::String(path.display().to_string())),
-            ]))
-        }) as Box<_>), Arc::new(Box::new(|id| {
-            qmp::device_del {
-                id,
-            }
-        }) as Box<_>))
+        let command = qmp::device_add::new(name.into(), Some(self.id.clone()), self.bus.clone(), vec![
+            ("evdev".into(), Any::String(path.display().to_string())),
+        ]);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(512); // HACK: wait for udev to see device and change permissions
+        let qemu = qemu.clone();
+        async move {
+            qemu.device_add(command, deadline).await
+        }.boxed()
+    }
+
+    fn command_delete(&self, qemu: &Arc<Qemu>) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
+        let command = qmp::device_del {
+            id: self.id.clone(),
+        };
+        let qemu = qemu.clone();
+        async move {
+            qemu.execute_qmp(command).map_ok(drop).await
+        }.boxed()
     }
 }
 
-impl<C: Command + Send + Sync + 'static, CD: Command + Send + Sync + 'static> RouteUInput<dyn Fn(PathBuf) -> (String, C) + Send + Sync, dyn Fn(String) -> CD + Send + Sync> {
-    fn new(qemu: Arc<Qemu>, builder: uinput::Builder, create: Arc<Box<dyn Fn(PathBuf) -> (String, C) + Send + Sync>>, delete: Arc<Box<dyn Fn(String) -> CD + Send + Sync>>) -> Self {
+pub struct RouteUInputInputLinux {
+    id: String,
+    repeat: bool,
+}
+
+impl UInputCommands for RouteUInputInputLinux {
+    fn command_create(&self, qemu: &Arc<Qemu>, path: &Path) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
+        let path = path.display();
+        let command = qmp::object_add {
+            id: self.id.clone(),
+            qom_type: "input-linux".into(),
+            props: Some(vec![
+                ("evdev".into(), Any::String(path.to_string())),
+                ("repeat".into(), Any::Bool(self.repeat)),
+            ].into_iter().collect()),
+        };
+        let qemu = qemu.clone();
+        async move {
+            qemu.execute_qmp(command).map_ok(drop).await
+        }.boxed()
+    }
+
+    fn command_delete(&self, qemu: &Arc<Qemu>) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
+        let command = qmp::object_del {
+            id: self.id.clone(),
+        };
+        let qemu = qemu.clone();
+        async move {
+            qemu.execute_qmp(command).map_ok(drop).await
+        }.boxed()
+    }
+}
+
+impl<U> RouteUInput<U> {
+    fn new(qemu: Arc<Qemu>, builder: uinput::Builder, commands: U) -> Self {
         RouteUInput {
             qemu,
             builder,
-            create,
-            delete,
+            commands: Arc::new(commands),
         }
     }
+}
 
-    pub fn spawn(&self, mut events: un_mpsc::Receiver<InputEvent>, mut error_sender: un_mpsc::Sender<Error>) {
-        let create = self.create.clone();
-        let delete = self.delete.clone();
+impl<U: UInputCommands> RouteUInput<U> {
+    pub fn spawn(&self, mut events: mpsc::Receiver<InputEvent>, mut error_sender: mpsc::Sender<Error>) {
         let qemu = self.qemu.clone();
         let uinput = self.builder.create();
+        let commands = self.commands.clone();
         tokio::spawn(async move {
             let uinput = uinput?;
             let path = uinput.path().to_owned();
             let mut uinput = uinput.to_sink()?;
-            let (id, create) = create(path);
-            let res = {
-                let qemu = qemu.clone();
-                async move {
-                    qemu.execute_qmp(create).await?;
-                    while let Some(e) = events.next().await {
-                        uinput.send(e).await
-                            .map_err(|e| format_err!("uinput write failed: {:?}", e))?;
-                    }
-                    Ok(())
+            commands.command_create(&qemu, &path).await?;
+            let res = async move {
+                while let Some(e) = events.next().await {
+                    uinput.send(e).await
+                        .map_err(|e| format_err!("uinput write failed: {:?}", e))?;
                 }
+                Ok(())
             }.await;
-            let qres = qemu.execute_qmp(delete(id)).await
-                .map(drop).map_err(From::from);
+            let qres = commands.command_delete(&qemu).await
+                .map_err(From::from);
             res.and_then(move |()| qres)
         }.then(move |r: Result<(), Error>| async move { match r {
             Err(e) => {
@@ -215,8 +277,8 @@ impl<C: Command + Send + Sync + 'static, CD: Command + Send + Sync + 'static> Ro
 }
 
 pub enum Route {
-    InputLinux(RouteUInput<dyn Fn(PathBuf) -> (String, qmp::object_add) + Send + Sync, dyn Fn(String) -> qmp::object_del + Send + Sync>),
-    VirtioHost(RouteUInput<dyn Fn(PathBuf) -> (String, qmp::device_add) + Send + Sync, dyn Fn(String) -> qmp::device_del + Send + Sync>),
+    InputLinux(RouteUInput<RouteUInputInputLinux>),
+    VirtioHost(RouteUInput<RouteUInputVirtio>),
     Qmp(RouteQmp),
     //Spice(RouteInputSpice),
 }
@@ -239,8 +301,8 @@ impl Route {
         }
     }
 
-    pub fn spawn(self, error_sender: un_mpsc::Sender<Error>) -> un_mpsc::Sender<InputEvent> {
-        let (sender, events) = un_mpsc::channel(crate::EVENT_BUFFER);
+    pub fn spawn(self, error_sender: mpsc::Sender<Error>) -> mpsc::Sender<InputEvent> {
+        let (sender, events) = mpsc::channel(crate::EVENT_BUFFER);
 
         match self {
             Route::InputLinux(ref uinput) => uinput.spawn(events, error_sender),

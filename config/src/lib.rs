@@ -2,12 +2,28 @@ extern crate input_linux as input;
 
 use std::collections::HashMap;
 use std::fmt;
+use enumflags2::BitFlags;
 use serde::{Serialize, Deserialize};
 use input::{Key, InputEvent, EventRef};
 
 pub mod keymap;
 
-pub type Config = Vec<ConfigScreen>;
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Config {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screens: Vec<ConfigScreen>,
+
+    #[serde(default)]
+    pub qemu: ConfigQemu,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hotkeys: Vec<ConfigHotkey>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub key_remap: HashMap<Key, Key>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exit_events: Vec<ConfigEvent>,
+}
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ConfigScreen {
@@ -19,18 +35,7 @@ pub struct ConfigScreen {
     pub host_source: ConfigSource,
 
     #[serde(default)]
-    pub ddc: ConfigDdc,
-
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hotkeys: Vec<ConfigHotkey>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub key_remap: HashMap<Key, Key>,
-
-    #[serde(default)]
-    pub qemu: ConfigQemu,
-
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exit_events: Vec<ConfigEvent>,
+    pub ddc: Option<ConfigDdc>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -91,12 +96,12 @@ pub struct ConfigQemu {
 
     #[serde(default)]
     pub driver: Option<ConfigQemuDriver>,
-    #[serde(default = "ConfigQemuDriver::ps2")]
-    pub keyboard_driver: ConfigQemuDriver,
-    #[serde(default = "ConfigQemuDriver::usb")]
-    pub relative_driver: ConfigQemuDriver,
-    #[serde(default = "ConfigQemuDriver::usb")]
-    pub absolute_driver: ConfigQemuDriver,
+    #[serde(default)]
+    pub keyboard_driver: Option<ConfigQemuDriver>,
+    #[serde(default)]
+    pub relative_driver: Option<ConfigQemuDriver>,
+    #[serde(default)]
+    pub absolute_driver: Option<ConfigQemuDriver>,
 
     #[serde(default = "ConfigQemuRouting::qmp")]
     pub routing: ConfigQemuRouting,
@@ -108,11 +113,31 @@ impl Default for ConfigQemu {
             ga_socket: Default::default(),
             qmp_socket: Default::default(),
             driver: Default::default(),
-            keyboard_driver: ConfigQemuDriver::Ps2,
-            relative_driver: ConfigQemuDriver::Usb,
-            absolute_driver: ConfigQemuDriver::Usb,
+            keyboard_driver: Default::default(),
+            relative_driver: Default::default(),
+            absolute_driver: Default::default(),
             routing: ConfigQemuRouting::Qmp,
         }
+    }
+}
+
+impl ConfigQemu {
+    pub fn keyboard_driver(&self) -> ConfigQemuDriver {
+        self.keyboard_driver
+            .or(self.driver)
+            .unwrap_or(ConfigQemuDriver::Ps2)
+    }
+
+    pub fn relative_driver(&self) -> ConfigQemuDriver {
+        self.relative_driver
+            .or(self.driver)
+            .unwrap_or(ConfigQemuDriver::Usb)
+    }
+
+    pub fn absolute_driver(&self) -> ConfigQemuDriver {
+        self.absolute_driver
+            .or(self.driver)
+            .unwrap_or(ConfigQemuDriver::Usb)
     }
 }
 
@@ -122,11 +147,6 @@ pub enum ConfigQemuDriver {
     Ps2,
     Usb,
     Virtio,
-}
-
-impl ConfigQemuDriver {
-    fn ps2() -> Self { ConfigQemuDriver::Ps2 }
-    fn usb() -> Self { ConfigQemuDriver::Usb }
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Serialize)]
@@ -173,17 +193,18 @@ pub enum ConfigEvent {
     Exit,
 }
 
-#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Deserialize, Serialize, BitFlags)]
+#[repr(u8)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigInputEvent {
-    Key,
-    Button,
-    Relative,
-    Absolute,
-    Misc,
-    Switch,
-    Led,
-    Sound,
+    Key = 0x01,
+    Button = 0x02,
+    Relative = 0x04,
+    Absolute = 0x08,
+    Misc = 0x10,
+    Switch = 0x20,
+    Led = 0x40,
+    Sound = 0x80,
 }
 
 impl ConfigInputEvent {

@@ -2,26 +2,27 @@ pub extern crate xcb;
 
 use futures::{Sink, Stream, ready};
 use failure::{Error, format_err};
+use input_linux::{InputEvent, EventTime, KeyEvent, KeyState, Key, AbsoluteEvent, AbsoluteAxis, SynchronizeEvent};
 use tokio::io::Registration;
 use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
 use log::{trace, warn, info};
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct XState {
+struct XState {
     pub width: u16,
     pub height: u16,
-    pub grabbed: bool,
     pub running: bool,
 }
 
 #[derive(Debug)]
-pub enum XEvent {
-    State(XState),
-    Visible(bool),
-    Focus(bool),
-    UnstickGuest,
-    Close,
+pub struct XInputEvent {
+    time: xcb::Time,
+    data: XInputEventData,
+}
+
+#[derive(Debug)]
+pub enum XInputEventData {
     Mouse {
         x: i16,
         y: i16,
@@ -40,10 +41,17 @@ pub enum XEvent {
 }
 
 #[derive(Debug)]
+pub enum XEvent {
+    Visible(bool),
+    Focus(bool),
+    Close,
+    Input(InputEvent),
+}
+
+#[derive(Debug)]
 pub enum XRequest {
     Quit,
     UnstickHost,
-    UnstickGuest,
     Grab,
     Ungrab,
 }
@@ -58,8 +66,7 @@ pub struct XContext {
     state: XState,
     next_event: Option<xcb::GenericEvent>,
     next_request: Option<XRequest>,
-    next_result: Option<XEvent>,
-    next_waker: Option<Waker>,
+    event_queue: Vec<XEvent>,
     stop_waker: Option<Waker>,
 
     atom_wm_state: xcb::Atom,
@@ -71,22 +78,6 @@ pub struct XContext {
 }
 
 unsafe impl Send for XContext { }
-
-pub trait SpinSendValue {
-    fn skip_threshold(&self) -> Option<usize>;
-}
-
-impl SpinSendValue for Result<XEvent, Error> {
-    fn skip_threshold(&self) -> Option<usize> {
-        match *self {
-            Ok(XEvent::Mouse { .. }) => Some(0),
-            Ok(XEvent::Key { .. }) => Some(1),
-            Ok(XEvent::Button { .. }) => Some(4),
-            Err(..) => Some(0x20),
-            _ => Some(0x10),
-        }
-    }
-}
 
 impl XContext {
     pub fn connect() -> Result<Self, Error> {
@@ -142,9 +133,8 @@ impl XContext {
             state: Default::default(),
             next_event: None,
 
-            next_result: None,
+            event_queue: Default::default(),
             next_request: None,
-            next_waker: None,
             stop_waker: None,
 
             conn,
@@ -264,93 +254,12 @@ impl XContext {
         }
     }
 
-    /*fn spin_send_once<T>(sender: &mut Sender<T>, value:T) -> Result<Option<T>, TrySendError<T>> {
-        match sender.try_send(value) {
-            Ok(..) => Ok(None),
-            Err(err) => {
-                if err.is_full() {
-                    Ok(Some(err.into_inner()))
-                } else {
-                    Err(err)
-                }
-            },
-        }
-    }*/
-
-    /*pub fn spin_send<T: fmt::Debug + SpinSendValue>(sender: &mut Sender<T>, value: T) -> Result<(), TrySendError<T>> {
-        use std::thread::sleep;
-        use std::time::Duration;
-
-        trace!("X spin sending {:?}", value);
-
-        let mut count = 0;
-        let mut value = Some(value);
-        while let Some(v) = match value.take() {
-            None => None,
-            Some(v) => Self::spin_send_once(sender, v)?,
-        } {
-            if count == 0 {
-                warn!("failed to queue X event");
-            }
-
-            if let Some(skip) = v.skip_threshold() {
-                if count >= skip {
-                    warn!("spin_send timed out");
-                    break
-                }
-            }
-
-            if count < 0xffff {
-                count += 1;
-            }
-
-            sleep(Duration::from_millis(20));
-
-            value = Some(v);
-        }
-
-        Ok(())
-    }*/
-
     pub fn xmain() -> Result<Self, Error> {
         let mut xcontext = Self::connect()?;
         xcontext.state.running = true;
         xcontext.map_window()?;
         Ok(xcontext)
     }
-
-    /*pub async fn xmain(mut recv: Receiver<XRequest>, sender: &mut Sender<Result<XEvent, Error>>) -> Result<(), Error> {
-        let mut xcontext = Self::connect()?;
-        xcontext.state.running = true;
-        xcontext.map_window()?;
-
-        while xcontext.state.running {
-            // poll for request
-            let processed = match recv.next().await {
-                None => break, // treat this as a request to exit?
-                Some(ref req) => xcontext.process_request(req)?,
-            };
-            // otherwise block on x event
-            let processed = match processed {
-                Some(processed) => Some(processed),
-                None => {
-                    let event = &xcontext.pump()?;
-                    xcontext.process_event(&event)?
-                },
-            };
-
-            // send processed event
-            if let Some(processed) = processed {
-                match Self::spin_send(sender, Ok(processed)) {
-                    Ok(..) => (),
-                    Err(ref err) if err.is_disconnected() => break,
-                    Err(err) => return Err(err.into()),
-                }
-            }
-        }
-
-        Ok(())
-    }*/
 
     fn handle_grab_status(&self, status: u8) -> Result<(), Error> {
         if status == xcb::GRAB_STATUS_SUCCESS as _ {
@@ -360,13 +269,12 @@ impl XContext {
         }
     }
 
-    pub fn process_request(&mut self, request: &XRequest) -> Result<Option<XEvent>, Error> {
+    pub fn process_request(&mut self, request: &XRequest) -> Result<(), Error> {
         trace!("processing X request {:?}", request);
 
         Ok(match *request {
             XRequest::Quit => {
                 self.stop();
-                None
             },
             XRequest::UnstickHost => {
                 let keys = xcb::query_keymap(&self.conn).get_reply()?;
@@ -386,12 +294,6 @@ impl XContext {
                         keycode += 1;
                     }
                 }
-
-                None
-
-            },
-            XRequest::UnstickGuest => {
-                Some(XEvent::UnstickGuest)
             },
             XRequest::Grab => {
                 let status = xcb::grab_keyboard(&self.conn,
@@ -413,19 +315,15 @@ impl XContext {
                     xcb::CURRENT_TIME,
                 ).get_reply()?.status();
                 self.handle_grab_status(status)?;
-                self.state.grabbed = true;
-                Some(XEvent::State(self.state.clone()))
             },
             XRequest::Ungrab => {
                 xcb::ungrab_keyboard(&self.conn, xcb::CURRENT_TIME).request_check()?;
                 xcb::ungrab_pointer(&self.conn, xcb::CURRENT_TIME).request_check()?;
-                self.state.grabbed = false;
-                Some(XEvent::State(self.state.clone()))
             },
         })
     }
 
-    pub fn process_event(&mut self, event: &xcb::GenericEvent) -> Result<Option<XEvent>, xcb::GenericError> {
+    fn process_event(&mut self, event: &xcb::GenericEvent) -> Result<(), xcb::GenericError> {
         let kind = event.response_type() & !0x80;
         trace!("processing X event {}", kind);
 
@@ -439,40 +337,38 @@ impl XContext {
 
                     power_level.unwrap_or(xcb::dpms::DPMS_MODE_ON) != xcb::dpms::DPMS_MODE_ON
                 };
-                if dpms_blank {
-                    Some(XEvent::Visible(false))
+                self.event_queue.push(if dpms_blank {
+                    XEvent::Visible(false)
                 } else {
                     match event.state() as _ {
                         xcb::VISIBILITY_FULLY_OBSCURED => {
-                            Some(XEvent::Visible(false))
+                            XEvent::Visible(false)
                         },
                         xcb::VISIBILITY_UNOBSCURED => {
-                            Some(XEvent::Visible(true))
+                            XEvent::Visible(true)
                         },
                         state => {
                             warn!("unknown visibility {}", state);
-                            None
+                            return Ok(())
                         },
                     }
-                }
+                });
             },
             xcb::CLIENT_MESSAGE => {
                 let event = unsafe { xcb::cast_event::<xcb::ClientMessageEvent>(event) };
 
                 match event.data().data32().get(0) {
                     Some(&atom) if atom == self.atom_wm_delete_window => {
-                        Some(XEvent::Close)
+                        self.event_queue.push(XEvent::Close);
                     },
                     Some(&atom) => {
                         let atom = xcb::get_atom_name(&self.conn, atom).get_reply();
                         info!("unknown X client message {:?}",
                             atom.as_ref().map(|a| a.name()).unwrap_or("UNKNOWN")
                         );
-                        None
                     },
                     None => {
                         warn!("empty client message");
-                        None
                     },
                 }
             },
@@ -488,15 +384,13 @@ impl XContext {
                         let window_state_iconic = 3;
                         match x.get(0) {
                             Some(&state) if state == window_state_withdrawn || state == window_state_iconic => {
-                                Some(XEvent::Visible(false))
+                                self.event_queue.push(XEvent::Visible(false));
                             },
                             Some(&state) => {
                                 info!("unknown WM_STATE {}", state);
-                                None
                             },
                             None => {
                                 warn!("expected WM_STATE state value");
-                                None
                             },
                         }
                     },
@@ -505,12 +399,11 @@ impl XContext {
                         info!("unknown property notify {:?}",
                             atom.as_ref().map(|a| a.name()).unwrap_or("UNKNOWN")
                         );
-                        None
                     },
                 }
             },
             xcb::FOCUS_OUT | xcb::FOCUS_IN => {
-                Some(XEvent::Focus(kind == xcb::FOCUS_IN))
+                self.event_queue.push(XEvent::Focus(kind == xcb::FOCUS_IN));
             },
             xcb::KEY_PRESS | xcb::KEY_RELEASE => {
                 let event = unsafe { xcb::cast_event::<xcb::KeyPressEvent>(event) };
@@ -532,81 +425,164 @@ impl XContext {
                     if peek_kind != kind && peek_time == event.time() && event.detail() == peek_detail {
                         // TODO: I think this only matters on release?
                         // repeat
-                        return Ok(None)
+                        return Ok(())
                     }
                 }
 
                 let keycode = self.keycode(event.detail());
                 let keysym = self.keysym(keycode);
 
-                Some(XEvent::Key {
-                    pressed: kind == xcb::KEY_PRESS,
-                    keycode,
-                    keysym: if keysym == Some(0) { None } else { keysym },
-                    state: event.state(),
-                })
+                let event = XInputEvent {
+                    time: event.time(),
+                    data: XInputEventData::Key {
+                        pressed: kind == xcb::KEY_PRESS,
+                        keycode,
+                        keysym: if keysym == Some(0) { None } else { keysym },
+                        state: event.state(),
+                    },
+                };
+                self.convert_x_events(&event)
             },
             xcb::BUTTON_PRESS | xcb::BUTTON_RELEASE => {
                 let event = unsafe { xcb::cast_event::<xcb::ButtonPressEvent>(event) };
-                Some(XEvent::Button {
-                    pressed: kind == xcb::BUTTON_PRESS,
-                    button: event.detail(),
-                    state: event.state(),
-                })
+                let event = XInputEvent {
+                    time: event.time(),
+                    data: XInputEventData::Button {
+                        pressed: kind == xcb::BUTTON_PRESS,
+                        button: event.detail(),
+                        state: event.state(),
+                    },
+                };
+                self.convert_x_events(&event)
             },
             xcb::MOTION_NOTIFY => {
                 let event = unsafe { xcb::cast_event::<xcb::MotionNotifyEvent>(event) };
-                Some(XEvent::Mouse {
-                    x: event.event_x(),
-                    y: event.event_y(),
-                })
+                let event = XInputEvent {
+                    time: event.time(),
+                    data: XInputEventData::Mouse {
+                        x: event.event_x(),
+                        y: event.event_y(),
+                    },
+                };
+                self.convert_x_events(&event)
             },
             xcb::MAPPING_NOTIFY => {
                 let setup = self.conn.get_setup();
                 self.keys = xcb::get_keyboard_mapping(&self.conn, setup.min_keycode(), setup.max_keycode() - setup.min_keycode()).get_reply()?;
                 self.mods = xcb::get_modifier_mapping(&self.conn).get_reply()?;
-
-                None
             },
             xcb::CONFIGURE_NOTIFY => {
                 let event = unsafe { xcb::cast_event::<xcb::ConfigureNotifyEvent>(event) };
                 self.state.width = event.width();
                 self.state.height = event.height();
-                Some(XEvent::State(self.state.clone()))
             },
             _ => {
                 info!("unknown X event {}", event.response_type());
-                None
             },
         })
+    }
+
+    fn x_button(button: xcb::Button) -> Option<Key> {
+        match button as _ {
+            xcb::BUTTON_INDEX_1 => Some(Key::ButtonLeft),
+            xcb::BUTTON_INDEX_2 => Some(Key::ButtonMiddle),
+            xcb::BUTTON_INDEX_3 => Some(Key::ButtonRight),
+            xcb::BUTTON_INDEX_4 => Some(Key::ButtonGearUp),
+            xcb::BUTTON_INDEX_5 => Some(Key::ButtonWheel), // Key::ButtonGearDown
+            // also map Key::ButtonSide, Key::ButtonExtra? qemu input-linux doesn't support fwd/back, but virtio probably does
+            _ => None,
+        }
+    }
+
+    fn x_keycode(key: xcb::Keycode) -> Option<Key> {
+        match Key::from_code(key as _) {
+            Ok(code) => Some(code),
+            Err(..) => None,
+        }
+    }
+
+    fn x_keysym(_key: xcb::Keysym) -> Option<Key> {
+        unimplemented!()
+    }
+
+    fn key_event(time: EventTime, key: Key, pressed: bool) -> InputEvent {
+        KeyEvent::new(time, key, KeyState::pressed(pressed)).into()
+    }
+
+    /*fn event_time(millis: xcb::Time) -> EventTime {
+        let seconds = millis / 1000;
+        let remaining = seconds % 1000;
+        let usecs = remaining as i64 * 1000;
+
+        EventTime::new(seconds as i64, usecs)
+    }*/
+
+    fn convert_x_events(&mut self, e: &XInputEvent) {
+        //let time = Self::event_time(e.time);
+        let time = Default::default();
+        match e.data {
+            XInputEventData::Mouse { x, y } => {
+                self.event_queue.extend([
+                    (self.state.width, x, AbsoluteAxis::X),
+                    (self.state.height, y, AbsoluteAxis::Y),
+                ].iter()
+                    .filter(|&&(dim, new, _)| dim != 0)
+                    .map(|&(dim, new, axis)| (dim, (new.max(0) as u16).min(dim), axis))
+                    .map(|(dim, new, axis)| AbsoluteEvent::new(
+                        time,
+                        axis,
+                        new as i32 * 0x8000 / dim as i32,
+                    )).map(|e| XEvent::Input(e.into())));
+            },
+            XInputEventData::Button { pressed, button, state: _ } => {
+                if let Some(button) = Self::x_button(button) {
+                    self.event_queue.push(XEvent::Input(Self::key_event(time, button, pressed).into()));
+                } else {
+                    warn!("unknown X button {}", button);
+                }
+            },
+            XInputEventData::Key { pressed, keycode, keysym, state: _ } => {
+                if let Some(key) = Self::x_keycode(keycode) {
+                    self.event_queue.push(XEvent::Input(Self::key_event(time, key, pressed).into()));
+                } else {
+                    warn!("unknown X keycode {} keysym {:?}", keycode, keysym);
+                }
+            },
+        }
+        self.event_queue.push(XEvent::Input(SynchronizeEvent::report(time).into()));
+    }
+
+    fn event_queue_pop(&mut self) -> Option<XEvent> {
+        if self.event_queue.is_empty() {
+            None
+        } else {
+            Some(self.event_queue.remove(0))
+        }
     }
 }
 
 impl Stream for XContext {
     type Item = Result<XEvent, Error>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let event = {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        {
             let this = self.as_mut().get_mut();
 
             if !this.state.running {
                 return Poll::Ready(None)
             }
 
-            match this.next_result.take() {
-                Some(res) => {
-                    if let Some(waker) = this.next_waker.take() {
-                        waker.wake();
-                    }
-                    return Poll::Ready(Some(Ok(res)))
-                },
+            match this.event_queue_pop() {
+                Some(res) =>
+                    return Poll::Ready(Some(Ok(res))),
                 None => (),
             }
 
             // wait for x event
             // blocking version: this.pump()
-            let event = match this.poll()? {
-                Some(e) => Some(e),
+            match this.poll()? {
+                Some(event) =>
+                    tokio::task::block_in_place(|| this.process_event(&event))?,
                 None => {
                     match this.fd.poll_read_ready(cx) {
                         Poll::Pending => {
@@ -617,20 +593,12 @@ impl Stream for XContext {
                             r?;
                         },
                     }
-                    this.poll()?
                 },
-            };
-            match &event {
-                None => None,
-                Some(e) => tokio::task::block_in_place(|| this.process_event(&e))?,
             }
-        };
-
-        match event {
-            // no response, recurse to wait on IO
-            None => self.poll_next(cx),
-            Some(res) => Poll::Ready(Some(Ok(res))),
         }
+
+        // recurse to return new events or wait on IO
+        self.poll_next(cx)
     }
 }
 
@@ -648,20 +616,12 @@ impl Sink<XRequest> for XContext {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
 
-        match this.next_result.is_some() {
-            true => {
-                this.next_waker = Some(cx.waker().clone());
-                Poll::Pending
-            },
-            false => {
-                if let Some(req) = this.next_request.take() {
-                    // TODO: consider storing errors instead of returning them here
-                    this.next_result = tokio::task::block_in_place(|| this.process_request(&req))?;
-                    Poll::Ready(Ok(()))
-                } else {
-                    Poll::Ready(Ok(()))
-                }
-            },
+        if let Some(req) = this.next_request.take() {
+            // TODO: consider storing errors instead of returning them here
+            tokio::task::block_in_place(|| this.process_request(&req))?;
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Ready(Ok(()))
         }
     }
 

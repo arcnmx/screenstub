@@ -1,6 +1,5 @@
 #![recursion_limit = "1024"]
 
-extern crate tokio_qapi as qapi;
 extern crate input_linux as input;
 extern crate screenstub_uinput as uinput;
 extern crate screenstub_config as config;
@@ -10,15 +9,14 @@ extern crate screenstub_ddc as ddc;
 extern crate screenstub_x as x;
 
 use std::process::exit;
+use std::time::Duration;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::io::{self, Write};
 use futures::channel::{mpsc, oneshot};
-use futures::channel::mpsc as un_mpsc;
 use futures::{future, TryFutureExt, FutureExt, StreamExt, SinkExt};
-use futures::lock::Mutex;
 use failure::{Error, format_err};
-use log::{warn, error, trace};
+use log::{warn, error};
 use clap::{Arg, App, SubCommand, AppSettings};
 use input::{InputId, Key, RelativeAxis, AbsoluteAxis, InputEvent, EventKind};
 use config::{Config, ConfigEvent, ConfigSourceName};
@@ -36,18 +34,25 @@ mod filter;
 mod sources;
 mod exec;
 mod process;
+mod util;
+
+type Events = event::Events<Arc<ConfigEvent>>;
 
 const EVENT_BUFFER: usize = 8;
 
-#[tokio::main]
-async fn main() {
-    match main_result().await {
-        Ok(code) => exit(code),
+fn main() {
+    let mut runtime = tokio::runtime::Runtime::new().unwrap();
+    let code = match runtime.block_on(main_result()) {
+        Ok(code) => code,
         Err(e) => {
             let _ = writeln!(io::stderr(), "{:?} {}", e, e);
-            exit(1);
+            1
         },
-    }
+    };
+
+    runtime.shutdown_timeout(Duration::from_secs(2));
+
+    exit(code);
 }
 
 async fn main_result() -> Result<i32, Error> {
@@ -94,7 +99,8 @@ async fn main_result() -> Result<i32, Error> {
 
     match matches.subcommand() {
         ("x", Some(..)) => {
-            let mut config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
+            let screen = config.screens.into_iter().next()
+                .ok_or_else(|| format_err!("expected a screen config"))?;
 
             let (mut x_sender, mut x_receiver) = mpsc::channel(0x20);
             let (mut xreq_sender, mut xreq_receiver) = mpsc::channel(0x08);
@@ -123,26 +129,32 @@ async fn main_result() -> Result<i32, Error> {
                 }
             }).map_err(From::from);
 
+            let (keyboard_driver, relative_driver, absolute_driver) =
+                (config.qemu.keyboard_driver(), config.qemu.relative_driver(), config.qemu.absolute_driver());
+
+            let mut events = event::Events::new();
+            config.hotkeys.into_iter()
+                .map(convert_hotkey)
+                .for_each(|(hotkey, on_press)| events.add_hotkey(hotkey, on_press));
+            config.key_remap.into_iter().for_each(|(from, to)| events.add_remap(from, to));
+
+            let events = Arc::new(events);
+
             let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
 
-            let mut sources = Sources::new(qemu.clone(), config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
+            let ddc = screen.ddc.unwrap_or_default();
+            let mut sources = Sources::new(qemu.clone(), screen.monitor, screen.host_source, screen.guest_source, ddc.host, ddc.guest);
             sources.fill().await?;
 
-            let (mut event_sender, mut event_recv) = un_mpsc::channel(EVENT_BUFFER);
-            let (error_sender, mut error_recv) = un_mpsc::channel(1);
+            let (mut event_sender, mut event_recv) = mpsc::channel(EVENT_BUFFER);
+            let (error_sender, mut error_recv) = mpsc::channel(1);
 
-            if let Some(driver) = config.qemu.driver {
-                config.qemu.keyboard_driver = driver.clone();
-                config.qemu.relative_driver = driver.clone();
-                config.qemu.absolute_driver = driver;
-            }
             let process = Process::new(
-                config.qemu.routing, config.qemu.keyboard_driver, config.qemu.relative_driver, config.qemu.absolute_driver, config.exit_events,
-                qemu.clone(), sources, xreq_sender.clone(), event_sender.clone(), error_sender.clone(),
+                config.qemu.routing, keyboard_driver, relative_driver, absolute_driver, config.exit_events,
+                qemu.clone(), events.clone(), sources, xreq_sender.clone(), event_sender.clone(), error_sender.clone(),
             );
 
             process.devices_init().await?;
-            process.set_is_mouse(false).await?; // TODO: config option to start up in relative mode instead
 
             let uinput_id = InputId {
                 bustype: input::sys::BUS_VIRTUAL,
@@ -184,20 +196,12 @@ async fn main_result() -> Result<i32, Error> {
 
             let process = Arc::new(process);
 
-            let (mut user_sender, user_receiver) = un_mpsc::channel::<Arc<ConfigEvent>>(0x08);
+            let (mut user_sender, user_receiver) = mpsc::channel::<Arc<ConfigEvent>>(0x08);
             let mut user_receiver = user_receiver
                 .map({
                     let process = process.clone();
                     move |event| process.process_user_event(&event)
                 });
-
-            let mut events = event::Events::new();
-            config.hotkeys.into_iter()
-                .map(convert_hotkey)
-                .for_each(|(hotkey, on_press)| events.add_hotkey(hotkey, on_press));
-            config.key_remap.into_iter().for_each(|(from, to)| events.add_remap(from, to));
-
-            let events = Arc::new(Mutex::new(events));
 
             let (event_loop, event_loop_abort) = future::abortable({
                 let events = events.clone();
@@ -205,11 +209,11 @@ async fn main_result() -> Result<i32, Error> {
                 let mut user_sender = user_sender.clone();
                 async move {
                     while let Some(event) = event_recv.next().await {
-                        let mut events = events.lock().await;
-                        let inputevent = events.map_input_event(event.clone());
+                        let user_events = events.process_input_event(&event);
+                        let inputevent = events.map_input_event(event);
                         let user_sender = &mut user_sender;
                         let f1 = async move {
-                            for e in events.process_input_event(&event) {
+                            for e in user_events {
                                 let _ = user_sender.send(e.clone()).await;
                             }
                         };
@@ -251,13 +255,12 @@ async fn main_result() -> Result<i32, Error> {
             let xevent_loop = tokio::spawn({
                 async move {
                     while let Some(xevent) = x_receiver.next().await {
-                        let events = events.lock().await.process_x_event(&xevent);
-                        for e in events {
+                        for e in events.process_x_event(&xevent) {
                             match e {
                                 ProcessedXEvent::UserEvent(e) => {
                                     let _ = user_sender.send(convert_user_event(e)).await;
                                 },
-                                ProcessedXEvent::InputEvent(e) if x_filter.try_lock().unwrap().filter_event(&e) => {
+                                ProcessedXEvent::InputEvent(e) if x_filter.filter_event(&e) => {
                                     let _ = event_sender.send(e).await;
                                 },
                                 ProcessedXEvent::InputEvent(_) => (),
@@ -270,7 +273,6 @@ async fn main_result() -> Result<i32, Error> {
             }).map_err(From::from);
 
             let res = loop {
-                let mut qmp_poll = future::poll_fn(|cx| qemu.poll_qmp_events(cx)).fuse();
                 futures::select! {
                     _ = xevent_exit_recv => break Ok(()),
                     error = error_recv.next() => if let Some(error) = error {
@@ -284,9 +286,6 @@ async fn main_result() -> Result<i32, Error> {
                                 Ok(()) => (),
                             }
                         });
-                    },
-                    e = qmp_poll => {
-                        trace!("Ignoring QMP event {:?}", e);
                     },
                 }
             };
@@ -324,10 +323,12 @@ async fn main_result() -> Result<i32, Error> {
             Ok(0)
         },
         ("source", Some(matches)) => {
-            let config = config.get(0).ok_or_else(|| format_err!("expected a screen config"))?.clone();
+            let screen = config.screens.into_iter().next()
+                .ok_or_else(|| format_err!("expected a screen config"))?;
+            let ddc = screen.ddc.unwrap_or_default();
 
             let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
-            let sources = Sources::new(qemu, config.monitor, config.host_source, config.guest_source, config.ddc.host, config.ddc.guest);
+            let sources = Sources::new(qemu, screen.monitor, screen.host_source, screen.guest_source, ddc.host, ddc.guest);
 
             match matches.value_of("source") {
                 Some("host") => sources.show(true, true).await,

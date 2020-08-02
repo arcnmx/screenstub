@@ -3,13 +3,12 @@ use std::future::Future;
 use std::sync::Arc;
 use std::pin::Pin;
 //use futures::{future, Stream, Future, IntoFuture};
-use futures::{future, select, FutureExt, StreamExt, SinkExt, TryFutureExt};
+use futures::{future, FutureExt, SinkExt, TryFutureExt};
 use futures::channel::mpsc as un_mpsc;
 use futures::lock::Mutex;
 use failure::{Error, format_err};
 use config::{ConfigEvent, ConfigGrab, ConfigGrabMode, ConfigInputEvent, ConfigQemuRouting, ConfigQemuDriver};
 use qapi::qga::{guest_shutdown, GuestShutdownMode};
-use qapi::qmp::{self, device_add, device_del, qom_list};
 use input::{self, InputEvent, RelativeAxis, InputId};
 use qemu::Qemu;
 use crate::filter::InputEventFilter;
@@ -18,8 +17,8 @@ use crate::route::Route;
 use crate::grab::GrabEvdev;
 use crate::exec::exec;
 use x::XRequest;
+use crate::Events;
 use log::{trace, info, error};
-use tokio::pin;
 
 pub struct GrabHandle {
     grab: Option<future::AbortHandle>,
@@ -42,9 +41,10 @@ pub struct Process {
     driver_absolute: ConfigQemuDriver,
     exit_events: Vec<config::ConfigEvent>,
     qemu: Arc<Qemu>,
+    events: Arc<Events>,
     sources: Arc<Pin<Box<Sources>>>,
     grabs: Arc<Mutex<HashMap<ConfigGrabMode, GrabHandle>>>,
-    x_input_filter: Arc<Mutex<InputEventFilter>>,
+    x_input_filter: Arc<InputEventFilter>,
     xreq_sender: un_mpsc::Sender<XRequest>,
     event_sender: un_mpsc::Sender<InputEvent>,
     error_sender: un_mpsc::Sender<Error>,
@@ -59,7 +59,7 @@ enum InputDevice {
 }
 
 impl Process {
-    pub fn new(routing: ConfigQemuRouting, driver_keyboard: ConfigQemuDriver, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, exit_events: Vec<config::ConfigEvent>, qemu: Arc<Qemu>, sources: Sources, xreq_sender: un_mpsc::Sender<XRequest>, event_sender: un_mpsc::Sender<InputEvent>, error_sender: un_mpsc::Sender<Error>) -> Self {
+    pub fn new(routing: ConfigQemuRouting, driver_keyboard: ConfigQemuDriver, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, exit_events: Vec<config::ConfigEvent>, qemu: Arc<Qemu>, events: Arc<Events>, sources: Sources, xreq_sender: un_mpsc::Sender<XRequest>, event_sender: un_mpsc::Sender<InputEvent>, error_sender: un_mpsc::Sender<Error>) -> Self {
         Process {
             routing,
             driver_keyboard,
@@ -67,9 +67,10 @@ impl Process {
             driver_absolute,
             exit_events,
             qemu,
+            events,
             sources: Arc::new(Box::pin(sources)),
             grabs: Arc::new(Mutex::new(Default::default())),
-            x_input_filter: Arc::new(Mutex::new(InputEventFilter::empty())),
+            x_input_filter: Arc::new(InputEventFilter::empty()),
             xreq_sender,
             event_sender,
             error_sender,
@@ -82,7 +83,7 @@ impl Process {
         }
     }
 
-    pub fn x_filter(&self) -> Arc<Mutex<InputEventFilter>> {
+    pub fn x_filter(&self) -> Arc<InputEventFilter> {
         self.x_input_filter.clone()
     }
 
@@ -94,7 +95,7 @@ impl Process {
         }
     }
 
-    fn add_device_cmd(device: InputDevice, driver: ConfigQemuDriver) -> Option<device_add> {
+    fn add_device_cmd(device: InputDevice, driver: ConfigQemuDriver) -> Option<qapi::qmp::device_add> {
         let driver = match (device, driver) {
             (InputDevice::Absolute, ConfigQemuDriver::Ps2) => panic!("PS/2 tablet not possible"),
             (_, ConfigQemuDriver::Ps2) => return None,
@@ -107,16 +108,7 @@ impl Process {
         };
 
         let id = Self::device_id(device);
-        Some(device_add::new(driver.into(), Some(id.into()), None, Vec::new()))
-    }
-
-    fn device_exists_cmd(id: &str) -> qom_list {
-        let path = format!("/machine/peripheral/{}", id);
-        qom_list { path }
-    }
-
-    fn device_exists_map(e: Result<Vec<qmp::ObjectPropertyInfo>, qapi::Error>) -> Result<bool, Error> {
-        e.map(|_| true).or_else(|e| if let qapi::ErrorClass::DeviceNotFound = e.class { Ok(false) } else { Err(e.into()) })
+        Some(qapi::qmp::device_add::new(driver.into(), Some(id.into()), None, Vec::new()))
     }
 
     async fn devices_init_cmd(qemu: Arc<Qemu>, routing: ConfigQemuRouting, device: InputDevice, driver: ConfigQemuDriver) -> Result<(), Error> {
@@ -125,65 +117,18 @@ impl Process {
             _ => (),
         };
 
-        let qmp = qemu.qmp_clone().await?;
-        let mut events = &*qmp;
-        let mut events = Pin::new(&mut events);
-
-        let id = Self::device_id(device);
-        let device_exists = qmp.execute(Self::device_exists_cmd(id))
-            .map_err(From::from)
-            .and_then(|r| future::ready(Self::device_exists_map(r)));
-        pin!(device_exists);
-        let device_exists = loop {
-            select! {
-                res = device_exists => break res?,
-                e = events.next() => {
-                    let _ = e.transpose()?;
-                },
-            }
-        };
-        if device_exists {
-            let mut events = events.as_mut();
-            let f1 = qmp.execute(device_del { id: id.into() })
-                .map_err(Error::from)
-                .and_then(|r| future::ready(r.map_err(From::from)))
-                .map_ok(drop);
-            let f2 = async move {
-                while let Some(e) = events.next().await {
-                    match e? {
-                        qmp::Event::DEVICE_DELETED { ref data, .. } if data.device.as_ref().map(|s| &s[..]) == Some(id) => return Ok(()),
-                        _ => (),
-                    }
-                }
-                Err(format_err!("Expected DEVICE_DELETED event"))
-            };
-
-            let _ = future::try_join(f1, f2).await?;
+        if let Some(cmd) = Self::add_device_cmd(device, driver) {
+            qemu.device_add(cmd, tokio::time::Instant::now()).await
+        } else {
+            Ok(())
         }
-        if let Some(c) = Self::add_device_cmd(device, driver) {
-            let c = qmp.execute(c)
-                .map_err(Error::from)
-                .and_then(|r| future::ready(r.map_err(From::from)))
-                .map_ok(drop);
-            pin!(c);
-            loop {
-                select! {
-                    res = c => break res?,
-                    e = events.next() => {
-                        let _ = e.transpose()?;
-                    },
-                }
-            }
-        }
-
-        Ok(())
     }
 
     pub async fn devices_init(&self) -> Result<(), Error> {
-        let routing = self.routing;
-        let driver_keyboard = self.driver_keyboard;
+        Self::devices_init_cmd(self.qemu.clone(), self.routing, InputDevice::Keyboard, self.driver_keyboard).await?;
+        self.set_is_mouse(false).await?; // TODO: config option to start up in relative mode instead
 
-        Self::devices_init_cmd(self.qemu.clone(), routing, InputDevice::Keyboard, driver_keyboard).await
+        Ok(())
     }
 
     async fn set_is_mouse_cmd(qemu: Arc<Qemu>, routing: ConfigQemuRouting, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, is_mouse: bool) -> Result<(), Error> {
@@ -224,6 +169,7 @@ impl Process {
                 let uinput_id = self.uinput_id.clone();
                 let driver_relative = self.driver_relative;
                 let driver_absolute = self.driver_absolute;
+                let prev_is_mouse = self.is_mouse();
                 let grab = GrabEvdev::new(devices, evdev_ignore.iter().cloned());
 
                 async move {
@@ -268,7 +214,7 @@ impl Process {
 
                     let grab = grab.spawn(event_sender, error_sender);
 
-                    x_filter.try_lock().unwrap().set_filter(xcore_ignore.iter().cloned());
+                    x_filter.set_filter(xcore_ignore.iter().cloned());
 
                     grabs.try_lock().unwrap().insert(mode, GrabHandle {
                         grab: Some(grab),
@@ -276,7 +222,10 @@ impl Process {
                         is_mouse,
                     });
 
-                    Self::set_is_mouse_cmd(qemu, routing, driver_relative, driver_absolute, is_mouse).await
+                    if prev_is_mouse != is_mouse {
+                        Self::set_is_mouse_cmd(qemu, routing, driver_relative, driver_absolute, is_mouse).await?;
+                    }
+                    Ok(())
                 }.boxed()
             },
             _ => future::err(format_err!("grab {:?} unimplemented", mode)).boxed(),
@@ -296,7 +245,7 @@ impl Process {
             },
             ConfigGrabMode::Evdev => {
                 if let Some(mut grab) = self.grabs.try_lock().unwrap().remove(&grab) {
-                    self.x_input_filter.try_lock().unwrap().unset_filter(grab.x_filter.drain(..));
+                    self.x_input_filter.unset_filter(grab.x_filter.drain(..));
                     if grab.is_mouse {
                         self.set_is_mouse(false).boxed()
                     } else {
@@ -323,14 +272,21 @@ impl Process {
         trace!("process_user_event({:?})", event);
         info!("User event {:?}", event);
         match event {
+            ConfigEvent::Exec(args) => {
+                exec(args).into_future().boxed()
+            },
             ConfigEvent::ShowHost => {
                 self.sources.show_host().boxed()
             },
             ConfigEvent::ShowGuest => {
                 self.sources.show_guest().boxed()
             },
-            ConfigEvent::Exec(args) => {
-                exec(args).into_future().boxed()
+            ConfigEvent::ToggleShow => {
+                if self.sources.showing_guest() {
+                    self.sources.show_host().boxed()
+                } else {
+                    self.sources.show_guest().boxed()
+                }
             },
             ConfigEvent::ToggleGrab(ref grab) => {
                 let mode = grab.mode();
@@ -340,18 +296,18 @@ impl Process {
                     self.grab(grab)
                 }
             },
-            ConfigEvent::ToggleShow => {
-                if self.sources.showing_guest() {
-                    self.sources.show_host().boxed()
-                } else {
-                    self.sources.show_guest().boxed()
-                }
-            },
             ConfigEvent::Grab(grab) => self.grab(grab),
             ConfigEvent::Ungrab(grab) => self.ungrab(*grab),
             ConfigEvent::UnstickGuest => {
-                // TODO: this shouldn't be necessary as a xevent
-                self.xreq(XRequest::UnstickGuest)
+                let mut event_sender = self.event_sender.clone();
+                let events = self.events.clone();
+                async move {
+                    for e in events.unstick_guest() {
+                        let _ = event_sender.send(e).await;
+                    }
+
+                    Ok(())
+                }.boxed()
             },
             ConfigEvent::UnstickHost => {
                 self.xreq(XRequest::UnstickHost)
