@@ -1,17 +1,5 @@
-- ddc:
-    #host: [] # disable input switching
-    #host: # configure how to switch back from the guest
-    #- ddc # (default) Use ddc-rs
-    #host:
-    #- exec: [ddccontrol, -r, "0x60", -w, "{}", /dev/i2c-5]
-    guest: # configure how to switch to the guest
-    #guest: [] # disable input switching
-    #- ddc (default) Controls DDC from the guest - requires no guest configuration but limited monitor support
-    - guest_wait # wait until guest agent responds
-    - guest_exec: ["C:/ScreenBright.exe", "-set", "0x60", "{}"] # "{}" is for decimal input value
-    #- guest_exec: ["C:/ddcset.exe", "setvcp", "60", "{:x}"] # or "0x{:x}" for hex input value
-    #- exec: ["ssh", "user@vm", "ddcutil", "setvcp", "0x60", "{}"] # system commands can also be used
-  monitor: # fill in with info from `screenstub detect`
+screens:
+- monitor: # fill in with info from `screenstub detect`
     manufacturer: GSM
     model: LG Ultra HD
     #serial: "..."
@@ -21,60 +9,77 @@
   #host_source: # Usually automatically detected
     #name: HDMI-1
     #value: 0x11
-  qemu:
-    #routing: qmp # (default) slower but does not require extra configuration or dependencies
-    #routing: spice # no external requirements # CURRENTLY UNIMPLEMENTED
-    #routing: input-linux # requires uinput
-    #routing: virtio-host # requires uinput, recommended for performance, requires vioinput drivers in guest
-    #driver: ps2 # use PS/2 in the guest (absolute mouse mode unsupported)
-    #driver: usb # (default) use USB mouse/tablet in the guest
-    #driver: virtio # Recommended but vioinput drivers must be installed in guest
-    #keyboard_driver: virtio # can also be set separately per input type, this should rarely be necessary
-    #relative_driver: virtio
-    #absolute_driver: virtio
-    qmp_socket: /tmp/vfio-qmp # path to QMP socket
-    ga_socket: /tmp/vfio-qga # path to Guest Agent socket
-  key_remap: # Arbitrary keys can be remapped in the guest
-    # See https://docs.rs/input-linux/*/input_linux/enum.Key.html for a list of key names available (mouse buttons can also be used)
-    LeftMeta: Reserved # disable the windows key
-    RightAlt: LeftMeta # remap right alt to trigger the windows key
-  hotkeys: # Trigger various events on key combinations
-  - triggers: [G]
-    modifiers: [LeftMeta]
-    on_release: false # trigger on downpress of key
-    global: false # optionally trigger even when not in focus # CURRENTLY UNIMPLEMENTED
-    events: # Select which events to trigger with this hotkey
-    - toggle_grab: xcore # Standard Xorg window grab
-    #- toggle_grab:
-    #    xdevice: # CURRENTLY UNIMPLEMENTED
-    #      devices: # Only grab specific devices from Xorg
-    #      - "..."
-    #- exec: [echo, hi] # Execute an arbitrary system command
-    #- show_host # switch to the host display
-    #- show_guest # switch to the guest display
-    #- toggle_show # switch the current display
-    #- unstick_guest # causes all held keys to be released in the guest
-    #- shutdown # safely shuts the guest system down
-    #- reboot # reboots the guest
-    #- exit # quits screenstub
-  - triggers: [Y]
-    modifiers: [LeftMeta]
-    events:
-    - toggle_grab: xcore
-    - toggle_grab:
-        evdev: # evdev grab is useful for playing games that don't work with absolute mouse events
-          exclusive: false # grab exclusive access from the device(s)
-          #new_device_name: "unique-grab-name" # create a new uinput device for this grab
-          xcore_ignore: [absolute, button] # which events to ignore from the window (key, button, absolute)
-          evdev_ignore: [key] # which events to ignore from the evdev device
-          devices: # List of devices to forward to guest
-          - /dev/input/by-id/my-event-mouse
-    - unstick_host # force-depress all Xorg keys (prevents keys getting stuck)
-  - triggers: [T]
-    modifiers: [LeftMeta]
-    on_release: false
-    events:
-    - toggle_show
-  exit_events: # Events to trigger on window close / exit
-  - show_host
-  #- shutdown
+  ddc:
+    #host: [] # disable input switching
+    #host: # configure how to switch back from the guest
+    #- ddc # (default) Use ddc-rs
+    #host:
+    #- exec: [ddccontrol, -r, "0x60", -w, "{}", /dev/i2c-5]
+    guest: # configure how to switch to the guest
+    #guest: [] # disable input switching
+    #- ddc (default) Controls DDC from the host GPU - requires no guest configuration but many monitors won't support this
+    - guest_wait # wait until guest agent responds
+    - guest_exec: ["C:/ScreenBright.exe", "-set", "0x60", "{}"] # "{}" is for decimal input value
+    #- guest_exec: ["C:/ddcset.exe", "setvcp", "60", "{:x}"] # or "0x{:x}" for hex input value
+    #- exec: ["ssh", "user@vm", "ddcutil", "setvcp", "0x60", "{}"] # system commands can also be used
+
+qemu:
+  #routing: qmp # (default) does not require extra configuration or dependencies
+  #routing: spice # no external requirements # CURRENTLY UNIMPLEMENTED
+  #routing: input-linux # requires uinput
+  #routing: virtio-host # requires uinput, recommended for performance, requires vioinput drivers in guest
+  #driver: ps2 # use PS/2 in the guest for all input devices (absolute mouse mode unsupported)
+  #driver: usb # use USB keyboard/mouse/tablet in the guest
+  #driver: virtio # Recommended but vioinput drivers must be installed in guest
+  #keyboard_driver: ps2 # (default) can also be set separately per input type, this should rarely be necessary
+  #relative_driver: usb # (default)
+  #absolute_driver: usb # (default)
+  qmp_socket: /tmp/vfio-qmp # path to QMP socket
+  ga_socket: /tmp/vfio-qga # path to Guest Agent socket
+
+key_remap: # Arbitrary keys can be remapped in the guest
+  # See https://docs.rs/input-linux/*/input_linux/enum.Key.html for a list of key names available (mouse buttons can also be used)
+  LeftMeta: Reserved # disable the windows key
+  RightAlt: LeftMeta # remap right alt to trigger the windows key
+
+hotkeys: # Trigger various events on key combinations
+- triggers: [G]
+  modifiers: [LeftMeta]
+  on_release: false # trigger on downpress of key
+  global: false # optionally trigger even when not in focus # CURRENTLY UNIMPLEMENTED
+  events: # Select which events to trigger with this hotkey
+  - toggle_grab: xcore # Standard Xorg window grab
+  #- toggle_grab:
+  #    xdevice: # CURRENTLY UNIMPLEMENTED
+  #      devices: # Only grab specific devices from Xorg
+  #      - "..."
+  #- exec: [echo, hi] # Execute an arbitrary system command
+  #- show_host # switch to the host display
+  #- show_guest # switch to the guest display
+  #- toggle_show # switch the current display
+  #- unstick_guest # causes all held keys to be released in the guest
+  #- shutdown # safely shuts the guest system down
+  #- reboot # reboots the guest
+  #- exit # quits screenstub
+- triggers: [Y]
+  modifiers: [LeftMeta]
+  events:
+  - toggle_grab: xcore # Confine input/mouse to window
+  - toggle_grab:
+      evdev: # evdev grab is useful for playing games that don't work with absolute mouse events
+        exclusive: false # grab exclusive access from the device(s)
+        #new_device_name: "unique-grab-name" # create a new uinput device for this grab
+        xcore_ignore: [absolute, button] # which events to ignore from the window (key, button, absolute)
+        evdev_ignore: [key] # which events to ignore from the evdev device
+        devices: # List of devices to forward to guest
+        - /dev/input/by-id/my-event-mouse
+  - unstick_host # force-depress all Xorg keys (prevents keys getting stuck)
+- triggers: [T]
+  modifiers: [LeftMeta]
+  on_release: false
+  events:
+  - toggle_show
+
+exit_events: # Events to trigger on window close / exit
+- show_host
+#- shutdown

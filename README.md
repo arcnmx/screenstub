@@ -13,18 +13,18 @@ something like Synergy.
 
 ## Setup Overview
 
-1. Install the [dependencies](#dependencies).
-2. Install screenstub via [cargo](#installation).
-3. Run `screenstub detect` to check that DDC/CI is working and your monitor
-   is detected. You may need to enable DDC/CI in your monitor's settings, or
-   [adjust settings if you have an NVIDIA card on the host](#nvidia), or [load
-   the i2c drivers](#host-control).
-4. Install and set up [qemu-ga to run on Windows startup](#qemu-guest-agent).
-5. Install a [command-line DDC/CI program in Windows](#windows).
-6. [Configure](#configuration) screenstub by modifying the example as necessary,
-   and setting up [the QEMU sockets](#qemu-control-sockets), [permissions](#input-permissions),
-   and check your [input devices](#guest-input-drivers). Also [prevent X from
-   ruining things](#host-xorg-configuration).
+1. Install screenstub via [cargo](#installation).
+2. Run `screenstub detect` to check that DDC/CI is working and your monitor
+   is detected. You may need to enable DDC/CI in your monitor's settings, and/or
+   [load the i2c drivers](#host-control).
+3. [Configure](#configuration) screenstub by modifying the example as necessary,
+   and setting up [the QEMU sockets](#qemu-control-sockets).
+
+Additional advanced configuration may be required:
+
+1. Install and set up [qemu-ga to run on Windows startup](#qemu-guest-agent).
+2. Install a [command-line DDC/CI program in Windows](#windows).
+3. Configure [permissions](#uinput-permissions), and check your [input devices](#guest-input-devices) in order to use the advanced routing modes.
 
 ## Installation
 
@@ -33,20 +33,6 @@ to be installed, and can be installed and run like so:
 
     cargo install --force --git https://github.com/arcnmx/screenstub
     screenstub -c config.yml x
-
-### Dependencies
-
-- [libddcutil](http://www.ddcutil.com/) is recommended to use for optimal
-performance, because exec approaches tend to take a few seconds to switch displays.
-Version `0.8.6` is required but is not yet available on most distributions -
-this probably will need to be compiled from source.
-  - `--no-default-features` can be used to compile on systems without libddcutil
-    support.
-- [qemucomm](https://github.com/arcnmx/qemucomm/blob/master/qemucomm) must be
-  installed, executable, and available in `$PATH` to communicate with QEMU.
-  - [socat](http://www.dest-unreach.org/socat/) is a dependency for qemucomm
-- [xcb](https://xcb.freedesktop.org/)
-
 
 ## Configuration
 
@@ -66,34 +52,46 @@ to be passed to QEMU (note libvirt may already expose some of these for you):
     -chardev socket,path=/tmp/vfio-qmp,server,nowait,id=qmp0
     -mon chardev=qmp0,id=qmp,mode=control
 
-### Input Permissions
+### Guest Input Devices
 
-`screenstub` needs access to both `/dev/input/event*` devices and `/dev/uinput`.
-Ensure that the user running it has proper permissions to both. udev can be used
-to set up access for a particular user or group.
+`screenstub` emulates three different input devices: a keyboard, a tablet for
+absolute coordinate mouse mapping, and a mouse for relative motion events. Each
+of these devices may be configured as USB devices, PS/2, or virtio. It is
+recommended that you remove all existing input devices from your QEMU command
+line configuration (`-usbdevice kbd`, `-usbdevice mouse`, `-usbdevice tablet`, `-device usb-kbd`, `-device usb-mouse`, `-device usb-tablet`).
 
-### Guest Input Drivers
+The default configuration sets them up for optimal compatibility, but virtio
+input drivers (vioinput) are recommended instead for performance reasons. These
+require drivers to be installed in the guest. You can [download them for Windows here](https://docs.fedoraproject.org/en-US/quick-docs/creating-windows-virtual-machines-using-virtio-drivers/index.html).
 
-For `input-linux` to work properly you must remove all USB mouse devices from
-your QEMU command line (`-usbdevice mouse`, `-usbdevice tablet`, `-device usb-mouse`, `-device usb-tablet`).
-You may keep a USB keyboard (`-device usb-kbd`) but this tends to interfere with
-the USB mouse, so it is recommended to leave this out and use the PS/2 keyboard
-driver.
+### Input Event Routing
 
-Using virtio input drivers (vioinput) instead is recommended for performance
-reasons but requires installation of the appropriate drivers in the VM.
+The routing mode describes how input events are translated from the host mouse
+and keyboard to the guest devices. The default `qmp` routing mode sends all input
+commands over the QEMU control socket. This requires no additional configuration
+on the host, but may not be optimal for performance. The other routing modes use
+`uinput` instead to transport events, which requires additional configuration.
 
-### Host Xorg Configuration
+#### UInput Permissions
 
-Copy [the xorg config](samples/xorg.conf.d/30-screenstub.conf) into your
-`xorg.conf` or `/etc/X11/xorg.conf.d/` directory to prevent Xorg from trying to
-use the virtual input devices for the host.
+To use the `virtio-host` or `input-linux` routing modes, `screenstub` needs
+access to `/dev/uinput` and the virtual `/dev/input/event*` devices.
+The uinput driver [needs to be loaded](https://github.com/chrippa/ds4drv/issues/93#issuecomment-265300511)
+by [configuring modprobe](samples/modules-load.d/uinput.conf) or similar.
+[udev rules](samples/udev/rules.d/99-uinput.rules) can be used to set up device
+permissions. Additional rules may be included for any external devices you want
+to "grab" and forward to the guest.
+
+Xorg also needs to be configured to ignore the virtual devices. Copy
+[the xorg config](samples/xorg.conf.d/30-screenstub.conf) into your `xorg.conf` or
+`/etc/X11/xorg.conf.d/` directory to prevent Xorg from trying to use the virtual
+input devices for the host.
 
 ### Host Control
 
 These are pretty straightforward to use when they work, however it is recommended
-to use `libddcutil` directly instead. You will probably need to load the `i2c-dev`
-kernel module for these to work, by placing [i2c.conf](samples/modules-load.d/i2c.conf)
+to use the built-in DDC/CI support instead. You will probably need to load the `i2c-dev`
+kernel module for it to work, by placing [i2c.conf](samples/modules-load.d/i2c.conf)
 in `/etc/modules-load.d/`.
 
 - [ddcutil](http://www.ddcutil.com/)
@@ -101,29 +99,27 @@ in `/etc/modules-load.d/`.
 
 #### NVIDIA
 
-The NVIDIA Linux drivers have had broken DDC/CI support for years now.
-[There are workarounds](http://www.ddcutil.com/nvidia/) but it seems that it is
-not currently possible to use DDC/CI over DisplayPort from the host.
-
+Some NVIDIA Linux drivers have had broken DDC/CI support.
+[There are workarounds](http://www.ddcutil.com/nvidia/) but there may be issues
+when using DDC/CI over DisplayPort from the host.
 
 ### Guest Control
 
-As usually a DDC/CI connection is only present on the currently active input,
-`screenstub` must issue a command to the guest operating system to instruct it
-to relinquish control over the screen to the host. QEMU Guest Agent and SSH are
-two common methods of executing commands inside of a guest.
+Many monitors require a DDC/CI command to be issued by the GPU on the currently
+active input. In this case `screenstub` must issue a command to the guest OS
+to instruct it to relinquish control over the screen back to the host.
+QEMU Guest Agent and SSH are two common methods of executing commands inside
+of a guest.
 
 #### Windows
 
-Windows applications interfacing with the screen must run as a logged in
-graphical user. Services like QEMU Guest Agent or SSHd often run as a system
-service and may have trouble running these commands without adjustments.
-
+- [ddcset](https://github.com/arcnmx/ddcset-rs) setvcp 60 3
 - [ScreenBright](http://www.overclock.net/forum/44-monitors-displays/1262322-guide-display-control-via-windows-brightness-contrast-etc-ddc-ci.html) -set 0x60 3
-- [ddcset](https://github.com/arcnmx/ddcset-c) 0x60 0x0f
-- The NVIDIA NVAPI library exposes I2C functions and doesn't seem to require a
-graphical user. If you really wanted this to work as a system service, that
-could be an option.
+
+Note that Windows applications interfacing with the screen must run as a logged
+in graphical user. Services like QEMU Guest Agent or SSHd often run as a system
+service and may have trouble running these commands without adjustments. NVAPI
+for example (via `ddcset -b nvapi`) may be used as an alternative on NVIDIA cards.
 
 ##### QEMU Guest Agent
 
