@@ -183,7 +183,7 @@ impl UInputCommands for RouteUInputVirtio {
             true => "virtio-input-host-device", // TODO: double-check this, what is the virtio bus for?
             false => "virtio-input-host-pci",
         };
-        let command = qmp::device_add::new(name.into(), Some(self.id.clone()), self.bus.clone(), vec![
+        let command = qmp::device_add::new(name, Some(self.id.clone()), self.bus.clone(), vec![
             ("evdev".into(), Any::String(path.display().to_string())),
         ]);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(512); // HACK: wait for udev to see device and change permissions
@@ -212,14 +212,10 @@ pub struct RouteUInputInputLinux {
 impl UInputCommands for RouteUInputInputLinux {
     fn command_create(&self, qemu: &Arc<Qemu>, path: &Path) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
         let path = path.display();
-        let command = qmp::object_add {
-            id: self.id.clone(),
-            qom_type: "input-linux".into(),
-            props: Some(vec![
-                ("evdev".into(), Any::String(path.to_string())),
-                ("repeat".into(), Any::Bool(self.repeat)),
-            ].into_iter().collect()),
-        };
+        let command = qmp::object_add::new(&self.id, "input-linux", vec![
+            ("evdev".into(), Any::String(path.to_string())),
+            ("repeat".into(), Any::Bool(self.repeat)),
+        ]);
         let qemu = qemu.clone();
         async move {
             qemu.execute_qmp(command).map_ok(drop).await

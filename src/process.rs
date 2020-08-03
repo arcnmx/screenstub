@@ -108,7 +108,7 @@ impl Process {
         };
 
         let id = Self::device_id(device);
-        Some(qapi::qmp::device_add::new(driver.into(), Some(id.into()), None, Vec::new()))
+        Some(qapi::qmp::device_add::new(driver, Some(id.into()), None, Vec::new()))
     }
 
     async fn devices_init_cmd(qemu: Arc<Qemu>, routing: ConfigQemuRouting, device: InputDevice, driver: ConfigQemuDriver) -> Result<(), Error> {

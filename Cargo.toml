@@ -21,7 +21,7 @@ log = "^0.4.1"
 serde_yaml = "^0.7.3"
 enumflags2 = "^0.6.4"
 result = "^1.0.0"
-qapi = { version = "^0.4.0", features = ["qmp", "qga"] }
+qapi = { version = "^0.6.0", features = ["qmp", "qga"] }
 
 [features]
 with-ddcutil = ["screenstub-ddc/with-ddcutil", "screenstub-config/with-ddcutil"]
@@ -39,7 +39,6 @@ members = [
 ]
 
 [patch.crates-io]
-qapi = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
-qapi-codegen = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
-qapi-spec = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
-qapi-qmp = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "futures-preview" }
+qapi = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "async-await" }
+qapi-spec = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "async-await" }
+qapi-qmp = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "async-await" }

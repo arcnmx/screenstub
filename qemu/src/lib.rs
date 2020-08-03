@@ -118,8 +118,7 @@ impl Qemu {
 
     pub async fn device_add(&self, add: qapi::qmp::device_add, deadline: Instant) -> Result<(), Error> {
         let qmp = self.connect_qmp().await?;
-        let id = add.0.get(&String::from("id"))
-            .and_then(|id| id.as_str())
+        let id = add.id.as_ref()
             .ok_or_else(|| format_err!("device_add id not found"))?
             .to_owned();
         let path = format!("/machine/peripheral/{}", id);
