@@ -10,17 +10,17 @@ screens:
     #name: HDMI-1
     #value: 0x11
   ddc:
-    #host: [] # disable input switching
-    #host: # configure how to switch back from the guest
-    #- ddc # (default) Use ddc-rs
-    #host:
-    #- exec: [ddccontrol, -r, "0x60", -w, "{}", /dev/i2c-5]
-    guest: # configure how to switch to the guest
+    #minimal_delay: 100ms # minimum time to wait between switching inputs again
     #guest: [] # disable input switching
-    #- ddc (default) Controls DDC from the host GPU - requires no guest configuration but many monitors won't support this
-    - guest_wait # wait until guest agent responds
-    - guest_exec: ["C:/ScreenBright.exe", "-set", "0x60", "{}"] # "{}" is for decimal input value
-    #- guest_exec: ["C:/ddcset.exe", "setvcp", "60", "{:x}"] # or "0x{:x}" for hex input value
+    #host: [] # disable input switching
+    guest: # configure how to switch to the guest
+    - guest_wait # wait until guest agent responds, otherwise might get stranded on other input
+    - ddc # (default) Use ddc-rs
+    #- exec: [ddccontrol, -r, "0x60", -w, "{}", /dev/i2c-5]
+    host: # configure how to switch back from the guest
+    #- ddc (default) Controls DDC from the host GPU - requires no guest agent but many monitors won't support this
+    - guest_exec: ["C:/ddcset.exe", "setvcp", "60", "{:x}"] # or "0x{:x}" for hex input value
+    #- guest_exec: ["C:/ScreenBright.exe", "-set", "0x60", "{}"] # "{}" is for decimal input value
     #- exec: ["ssh", "user@vm", "ddcutil", "setvcp", "0x60", "{}"] # system commands can also be used
 
 qemu:
