@@ -398,6 +398,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "humantime"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "humantime-serde"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "humantime 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde 1.0.114 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "i2c"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -901,6 +915,7 @@ version = "0.0.1"
 dependencies = [
  "csv 1.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "enumflags2 0.6.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "humantime-serde 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "input-linux 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "qapi-qmp 0.6.0 (git+https://github.com/arcnmx/qapi-rs.git?branch=async-await)",
  "qapi-spec 0.3.0 (git+https://github.com/arcnmx/qapi-rs.git?branch=async-await)",
@@ -1305,6 +1320,8 @@ dependencies = [
 "checksum gimli 0.22.0 (registry+https://github.com/rust-lang/crates.io-index)" = "aaf91faf136cb47367fa430cd46e37a788775e7fa104f8b4bcb3861dc389b724"
 "checksum hermit-abi 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)" = "3deed196b6e7f9e44a2ae8d94225d80302d81208b1bb673fd21fe634645c85a9"
 "checksum humantime 1.3.0 (registry+https://github.com/rust-lang/crates.io-index)" = "df004cfca50ef23c36850aaaa59ad52cc70d0e90243c3c7737a4dd32dc7a3c4f"
+"checksum humantime 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)" = "3c1ad908cc71012b7bea4d0c53ba96a8cba9962f048fa68d143376143d863b7a"
+"checksum humantime-serde 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = "f1c57351e2c81b7a03e82a6c8f4198b309c158f6d67c4adb707af6af7d91465a"
 "checksum i2c 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "60c7b7bdd7b3a985fdcf94a0d7d98e7a47fde8b7f22fb55ce1a91cc104a2ce9a"
 "checksum i2c-linux 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)" = "c0268a871aaa071221d6c2875ebedcf64710e59b0d87c68c8faf5e98b87dd2a4"
 "checksum i2c-linux-sys 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)" = "72b70fd3d30157850c87f4c7c09c0857d9c2e8c996bcbe23ec1299126e0479ec"

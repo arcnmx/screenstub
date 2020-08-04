@@ -268,13 +268,35 @@ impl Process {
         }.boxed()
     }
 
+    fn map_exec_arg<S: AsRef<str>>(s: S) -> Result<String, Error> {
+        // TODO: variable substitution or something
+        Ok(s.as_ref().into())
+    }
+
     pub fn process_user_event(&self, event: &ConfigEvent) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
         trace!("process_user_event({:?})", event);
         info!("User event {:?}", event);
         match event {
             ConfigEvent::Exec(args) => {
-                exec(args).into_future().boxed()
+                let args = args.iter()
+                    .map(|i| Self::map_exec_arg(i))
+                    .collect::<Result<Vec<_>, Error>>();
+                match args {
+                    Err(e) => future::ready(Err(e)).boxed(),
+                    Ok(args) => exec(args).into_future().boxed(),
+                }
             },
+            ConfigEvent::GuestExec(args) => {
+                let args = args.iter()
+                    .map(|i| Self::map_exec_arg(i))
+                    .collect::<Result<Vec<_>, Error>>();
+                match args {
+                    Err(e) => future::ready(Err(e)).boxed(),
+                    Ok(args) => self.qemu.guest_exec(args).into_future().map_ok(drop).boxed(),
+                }
+            },
+            ConfigEvent::GuestWait =>
+                self.qemu.guest_wait().boxed(),
             ConfigEvent::ShowHost => {
                 self.sources.show_host().boxed()
             },

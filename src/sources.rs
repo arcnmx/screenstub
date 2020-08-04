@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::time::{Duration, Instant, delay_until};
 use failure::{Error, format_err};
 use qemu::Qemu;
 use config::{ConfigSource, ConfigMonitor, ConfigDdcMethod};
@@ -18,6 +19,8 @@ pub struct Sources {
     guest: Vec<Arc<ConfigDdcMethod>>,
     monitor: Arc<SearchDisplay>,
     ddc: Arc<Mutex<Option<Box<DynMonitor>>>>,
+    throttle: Arc<Mutex<Instant>>,
+    throttle_duration: Duration,
 }
 
 fn convert_display(monitor: ConfigMonitor) -> SearchDisplay {
@@ -31,7 +34,7 @@ fn convert_display(monitor: ConfigMonitor) -> SearchDisplay {
 }
 
 impl Sources {
-    pub fn new(qemu: Arc<Qemu>, display: ConfigMonitor, source_host: ConfigSource, source_guest: ConfigSource, host: Vec<ConfigDdcMethod>, guest: Vec<ConfigDdcMethod>) -> Self {
+    pub fn new(qemu: Arc<Qemu>, display: ConfigMonitor, source_host: ConfigSource, source_guest: ConfigSource, host: Vec<ConfigDdcMethod>, guest: Vec<ConfigDdcMethod>, throttle_duration: Duration) -> Self {
         Sources {
             qemu,
             source_guest: source_guest.value(),
@@ -41,6 +44,8 @@ impl Sources {
             guest: guest.into_iter().map(Arc::new).collect(),
             monitor: Arc::new(convert_display(display)),
             ddc: Arc::new(Mutex::new(None)),
+            throttle: Arc::new(Mutex::new(Instant::now() - throttle_duration)),
+            throttle_duration,
         }
     }
 
@@ -69,11 +74,6 @@ impl Sources {
 
             Ok(())
         })
-    }
-
-    async fn detect_guest_(qemu: &Qemu) -> Result<(), Error> {
-        qemu.connect_qga().await
-            .map(drop).map_err(Error::from)
     }
 
     fn map_source_arg<S: AsRef<str>>(s: S, source: Option<u8>, host: bool) -> Result<String, Error> {
@@ -151,8 +151,17 @@ impl Sources {
                 ).collect()
         };
         let showing_guest = self.showing_guest.clone();
+        let throttle = self.throttle.clone();
+        let throttle_duration = self.throttle_duration;
         async move {
             showing_guest.store(!host, Ordering::Relaxed);
+            let throttle_old;
+            {
+                let mut throttle = throttle.lock().unwrap();
+                throttle_old = *throttle;
+                *throttle = Instant::now() + throttle_duration;
+            };
+            delay_until(throttle_old).await;
             for method in methods {
                 method.await?;
             }
@@ -173,7 +182,7 @@ impl Sources {
             self.qemu.clone(),
         );
         async move { match &*method {
-            ConfigDdcMethod::GuestWait => Self::detect_guest_(&qemu).await,
+            ConfigDdcMethod::GuestWait => qemu.guest_wait().await,
             ConfigDdcMethod::Ddc | ConfigDdcMethod::Libddcutil | ConfigDdcMethod::Ddcutil => {
                 tokio::task::spawn_blocking(move || {
                     let mut ddc = ddc.lock().unwrap();

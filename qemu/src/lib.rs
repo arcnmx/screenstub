@@ -201,6 +201,11 @@ impl Qemu {
             }
         }
     }
+
+    pub fn guest_wait(&self) -> impl Future<Output=Result<(), Error>> {
+        self.connect_qga()
+            .map_ok(drop).map_err(Error::from)
+    }
 }
 
 pub struct GuestExec<'a> {

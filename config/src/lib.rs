@@ -1,6 +1,7 @@
 extern crate input_linux as input;
 
 use std::collections::HashMap;
+use std::time::Duration;
 use std::fmt;
 use enumflags2::BitFlags;
 use serde::{Serialize, Deserialize};
@@ -75,6 +76,7 @@ impl Default for ConfigDdc {
         Self {
             host: ConfigDdcMethod::default_host(),
             guest: ConfigDdcMethod::default_guest(),
+            minimal_delay: Self::default_delay(),
         }
     }
 }
@@ -85,6 +87,14 @@ pub struct ConfigDdc {
     pub host: Vec<ConfigDdcMethod>,
     #[serde(default = "ConfigDdcMethod::default_guest")]
     pub guest: Vec<ConfigDdcMethod>,
+    #[serde(default = "ConfigDdc::default_delay", with = "humantime_serde")]
+    pub minimal_delay: Duration,
+}
+
+impl ConfigDdc {
+    fn default_delay() -> Duration {
+        Duration::from_millis(100)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -180,6 +190,8 @@ pub struct ConfigHotkey {
 #[serde(rename_all = "snake_case")]
 pub enum ConfigEvent {
     Exec(Vec<String>),
+    GuestExec(Vec<String>),
+    GuestWait,
     ShowHost,
     ShowGuest,
     ToggleShow,

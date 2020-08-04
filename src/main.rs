@@ -143,7 +143,7 @@ async fn main_result() -> Result<i32, Error> {
             let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
 
             let ddc = screen.ddc.unwrap_or_default();
-            let mut sources = Sources::new(qemu.clone(), screen.monitor, screen.host_source, screen.guest_source, ddc.host, ddc.guest);
+            let mut sources = Sources::new(qemu.clone(), screen.monitor, screen.host_source, screen.guest_source, ddc.host, ddc.guest, ddc.minimal_delay);
             sources.fill().await?;
 
             let (mut event_sender, mut event_recv) = mpsc::channel(EVENT_BUFFER);
@@ -328,7 +328,7 @@ async fn main_result() -> Result<i32, Error> {
             let ddc = screen.ddc.unwrap_or_default();
 
             let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
-            let sources = Sources::new(qemu, screen.monitor, screen.host_source, screen.guest_source, ddc.host, ddc.guest);
+            let sources = Sources::new(qemu, screen.monitor, screen.host_source, screen.guest_source, ddc.host, ddc.guest, ddc.minimal_delay);
 
             match matches.value_of("source") {
                 Some("host") => sources.show(true, true).await,
