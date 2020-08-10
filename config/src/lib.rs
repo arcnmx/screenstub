@@ -35,8 +35,11 @@ pub struct ConfigScreen {
     #[serde(default)]
     pub host_source: ConfigSource,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddc: Option<ConfigDdc>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_instance: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -311,6 +314,8 @@ pub struct ConfigMonitor {
     pub serial: Option<String>,
     //#[serde(default, skip_serializing_if = "Option::is_none")]
     // pub path: Option<DisplayPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xrandr_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

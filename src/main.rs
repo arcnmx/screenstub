@@ -109,9 +109,11 @@ async fn main_result() -> Result<i32, Error> {
 
     match matches.subcommand() {
         ("x", Some(..)) => {
+            let xinstance = screen.x_instance.unwrap_or("auto".into());
+
             let (mut x_sender, mut x_receiver) = mpsc::channel(0x20);
             let (mut xreq_sender, mut xreq_receiver) = mpsc::channel(0x08);
-            let x = x::XContext::xmain()?;
+            let x = x::XContext::xmain("screenstub", "screenstub", &xinstance)?;
             let xmain = tokio::spawn(async move {
                 let mut x = x.fuse();
                 loop {

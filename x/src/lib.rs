@@ -74,7 +74,6 @@ pub struct XContext {
     atom_wm_delete_window: xcb::Atom,
     atom_net_wm_state: xcb::Atom,
     atom_net_wm_state_fullscreen: xcb::Atom,
-    atom_atom: xcb::Atom,
 }
 
 unsafe impl Send for XContext { }
@@ -126,7 +125,6 @@ impl XContext {
             atom_wm_delete_window: xcb::intern_atom(&conn, true, "WM_DELETE_WINDOW").get_reply()?.atom(),
             atom_net_wm_state: xcb::intern_atom(&conn, true, "_NET_WM_STATE").get_reply()?.atom(),
             atom_net_wm_state_fullscreen: xcb::intern_atom(&conn, true, "_NET_WM_STATE_FULLSCREEN").get_reply()?.atom(),
-            atom_atom: xcb::intern_atom(&conn, true, "ATOM").get_reply()?.atom(),
 
             keys,
             mods,
@@ -143,12 +141,41 @@ impl XContext {
         })
     }
 
+    pub fn set_wm_name(&self, name: &str) -> Result<(), Error> {
+        // TODO: set _NET_WM_NAME instead? or both?
+
+        xcb::change_property(&self.conn,
+            xcb::PROP_MODE_REPLACE as _,
+            self.window,
+            xcb::ATOM_WM_NAME,
+            xcb::ATOM_STRING, 8,
+            name.as_bytes()
+        ).request_check()?;
+
+        Ok(())
+    }
+
+    pub fn set_wm_class(&self, class: &str, instance: &str) -> Result<(), Error> {
+        // TODO: ensure neither class or instance contain nul byte
+        let wm_class_string = format!("{}\0{}", class, instance);
+
+        xcb::change_property(&self.conn,
+            xcb::PROP_MODE_REPLACE as _,
+            self.window,
+            xcb::ATOM_WM_CLASS,
+            xcb::ATOM_STRING, 8,
+            wm_class_string.as_bytes()
+        ).request_check()?;
+
+        Ok(())
+    }
+
     pub fn map_window(&self) -> Result<(), Error> {
         xcb::change_property(&self.conn,
             xcb::PROP_MODE_REPLACE as _,
             self.window,
             self.atom_wm_protocols,
-            self.atom_atom, 32,
+            xcb::ATOM_ATOM, 32,
             &[self.atom_wm_delete_window]
         ).request_check()?;
 
@@ -156,7 +183,7 @@ impl XContext {
             xcb::PROP_MODE_APPEND as _,
             self.window,
             self.atom_net_wm_state,
-            self.atom_atom, 32,
+            xcb::ATOM_ATOM, 32,
             &[self.atom_net_wm_state_fullscreen]
         ).request_check()?;
 
@@ -254,9 +281,11 @@ impl XContext {
         }
     }
 
-    pub fn xmain() -> Result<Self, Error> {
+    pub fn xmain(name: &str, class: &str, instance: &str) -> Result<Self, Error> {
         let mut xcontext = Self::connect()?;
         xcontext.state.running = true;
+        xcontext.set_wm_name(name)?;
+        xcontext.set_wm_class(class, instance)?;
         xcontext.map_window()?;
         Ok(xcontext)
     }
