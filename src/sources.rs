@@ -1,6 +1,7 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use futures::lock::Mutex;
 use tokio::time::{Duration, Instant, delay_until};
 use failure::{Error, format_err};
 use qemu::Qemu;
@@ -14,11 +15,12 @@ pub struct Sources {
     qemu: Arc<Qemu>,
     source_guest: Option<u8>,
     source_host: Option<u8>,
-    showing_guest: Arc<AtomicBool>,
+    target_showing: Arc<AtomicBool>,
+    showing_guest: Arc<AtomicU8>,
     host: Vec<Arc<ConfigDdcMethod>>,
     guest: Vec<Arc<ConfigDdcMethod>>,
     monitor: Arc<SearchDisplay>,
-    ddc: Arc<Mutex<Option<Box<DynMonitor>>>>,
+    ddc: Arc<StdMutex<Option<Box<DynMonitor>>>>,
     throttle: Arc<Mutex<Instant>>,
     throttle_duration: Duration,
 }
@@ -39,11 +41,12 @@ impl Sources {
             qemu,
             source_guest: source_guest.value(),
             source_host: source_host.value(),
-            showing_guest: Arc::new(AtomicBool::new(false)), // TODO: what if we start when it is showing?? use guest-exec to check if monitor is reachable?
+            target_showing: Arc::new(AtomicBool::new(false)),
+            showing_guest: Arc::new(AtomicU8::new(2)),
             host: host.into_iter().map(Arc::new).collect(),
             guest: guest.into_iter().map(Arc::new).collect(),
             monitor: Arc::new(convert_display(display)),
-            ddc: Arc::new(Mutex::new(None)),
+            ddc: Arc::new(StdMutex::new(None)),
             throttle: Arc::new(Mutex::new(Instant::now() - throttle_duration)),
             throttle_duration,
         }
@@ -93,8 +96,18 @@ impl Sources {
         })
     }
 
-    pub fn showing_guest(&self) -> bool {
-        self.showing_guest.load(Ordering::Relaxed)
+    // TODO: detect current showing state via ddc when unknown?
+
+    pub fn showing_guest(&self) -> Option<bool> {
+        Self::showing_guest_(&self.showing_guest)
+    }
+
+    fn showing_guest_(showing_guest: &AtomicU8) -> Option<bool> {
+        match showing_guest.load(Ordering::Relaxed) {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
     }
 
     pub fn show_guest(&self) -> impl Future<Output=Result<(), Error>> {
@@ -137,37 +150,60 @@ impl Sources {
     }
 
     pub fn show(&self, host: bool, force: bool) -> impl Future<Output=Result<(), Error>> {
-        let methods: Vec<_> = if !force && self.showing_guest() != host {
-            Vec::new()
-        } else {
-            let methods = if host {
-                &self.host
-            } else {
-                &self.guest
-            };
-            methods.iter().cloned()
-                .map(|method|
-                    self.show_(host, method.clone())
-                ).collect()
-        };
+        let show_host = self.show_commands(true);
+        let show_guest = self.show_commands(false);
+
+        self.target_showing.store(host, Ordering::Relaxed);
+
+        let target_showing = self.target_showing.clone();
         let showing_guest = self.showing_guest.clone();
         let throttle = self.throttle.clone();
         let throttle_duration = self.throttle_duration;
         async move {
-            showing_guest.store(!host, Ordering::Relaxed);
-            let throttle_old;
-            {
-                let mut throttle = throttle.lock().unwrap();
-                throttle_old = *throttle;
-                *throttle = Instant::now() + throttle_duration;
+            let mut throttle = throttle.lock().await;
+
+            let throttle_until = *throttle;
+            let now = Instant::now();
+            let throttle_until = if throttle_until <= now {
+                // a short delay gives the event loop a chance to change its mind
+                now + Duration::from_millis(48)
+            } else {
+                throttle_until
             };
-            delay_until(throttle_old).await;
-            for method in methods {
-                method.await?;
+            delay_until(throttle_until).await;
+
+            let host = target_showing.load(Ordering::Relaxed);
+            let guest = !host;
+
+            if force || Self::showing_guest_(&showing_guest) != Some(guest) {
+                let methods = if host {
+                    show_host
+                } else {
+                    show_guest
+                };
+
+                for method in methods {
+                    method.await?;
+                }
+
+                showing_guest.store(guest as u8, Ordering::Relaxed);
+                *throttle = Instant::now() + throttle_duration;
             }
 
             Ok(())
         }
+    }
+
+    fn show_commands(&self, host: bool) -> Vec<impl Future<Output=Result<(), Error>>> {
+        let methods = if host {
+            &self.host
+        } else {
+            &self.guest
+        };
+        methods.iter().cloned()
+            .map(|method|
+                self.show_(host, method)
+            ).collect()
     }
 
     fn show_(&self, host: bool, method: Arc<ConfigDdcMethod>) -> impl Future<Output=Result<(), Error>> {

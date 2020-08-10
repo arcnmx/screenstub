@@ -304,7 +304,7 @@ impl Process {
                 self.sources.show_guest().boxed()
             },
             ConfigEvent::ToggleShow => {
-                if self.sources.showing_guest() {
+                if self.sources.showing_guest().unwrap_or_default() {
                     self.sources.show_host().boxed()
                 } else {
                     self.sources.show_guest().boxed()
