@@ -37,8 +37,3 @@ members = [
 	"ddc",
 	"x",
 ]
-
-[patch.crates-io]
-qapi = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "async-await" }
-qapi-spec = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "async-await" }
-qapi-qmp = { git = "https://github.com/arcnmx/qapi-rs.git", branch = "async-await" }
