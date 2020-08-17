@@ -11,6 +11,7 @@ addons:
     - libxrandr-dev
     - libdrm-dev
     - libxcb1-dev
+    - libxcb-dpms0-dev
     - libxcb-xtest0-dev
     - libxcb-xkb-dev
 cache:

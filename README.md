@@ -37,7 +37,7 @@ and can be installed and run like so:
 ### Dependencies
 
 - udev (Debian: libudev-dev)
-- libxcb (Debian: libxcb1-dev libxcb-xtest0-dev libxcb-xkb-dev)
+- libxcb (Debian: libxcb1-dev libxcb-dpms0-dev libxcb-xtest0-dev libxcb-xkb-dev)
 
 ## Configuration
 
