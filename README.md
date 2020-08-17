@@ -38,6 +38,11 @@ and can be installed and run like so:
 
 - udev (Debian: libudev-dev)
 - libxcb (Debian: libxcb1-dev libxcb-dpms0-dev libxcb-xtest0-dev libxcb-xkb-dev)
+- python (build-time only to generate xcb bindings)
+
+### Packages
+
+- [Nix{,OS}](https://github.com/arcnmx/nixexprs): `nix run -f https://github.com/nix-community/NUR/archive/master.tar.gz repos.arc.packages.screenstub -c screenstub`
 
 ## Configuration
 
@@ -49,8 +54,9 @@ DDC/CI capable monitors and their inputs.
 ### QEMU Control Sockets
 
 `screenstub` requires both QMP and guest agent sockets available to properly
-control the VM and QEMU itself. This requires something similar command-line flags
-to be passed to QEMU (note libvirt may already expose some of these for you):
+control the VM and QEMU itself. This requires something similar to the following
+command-line flags to be passed to QEMU (note libvirt may already expose some of
+these for you):
 
     -chardev socket,path=/tmp/vfio-qga,server,nowait,id=qga0
     -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0
