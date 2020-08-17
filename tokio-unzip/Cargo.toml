@@ -1,6 +1,0 @@
-[package]
-name = "tokio-unzip"
-version = "0.0.1"
-
-[dependencies]
-futures = "^0.1.18"
