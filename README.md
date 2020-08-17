@@ -28,11 +28,16 @@ Additional advanced configuration may be required:
 
 ## Installation
 
-Requires a modern stable [Rust toolchain](https://www.rust-lang.org/en-US/install.html)
-to be installed, and can be installed and run like so:
+Requires a modern stable [Rust toolchain](https://www.rust-lang.org/en-US/install.html),
+and can be installed and run like so:
 
     cargo install --force --git https://github.com/arcnmx/screenstub
     screenstub -c config.yml x
+
+### Dependencies
+
+- udev (Debian: libudev-dev)
+- libxcb (Debian: libxcb1-dev libxcb-xtest0-dev libxcb-xkb-dev)
 
 ## Configuration
 
