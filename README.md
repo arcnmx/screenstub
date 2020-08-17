@@ -120,6 +120,7 @@ of a guest.
 
 - [ddcset](https://github.com/arcnmx/ddcset-rs) setvcp 60 3
 - [ScreenBright](http://www.overclock.net/forum/44-monitors-displays/1262322-guide-display-control-via-windows-brightness-contrast-etc-ddc-ci.html) -set 0x60 3
+- [ClickMonitorDDC](https://clickmonitorddc.bplaced.net/) s DVI1
 
 Note that Windows applications interfacing with the screen must run as a logged
 in graphical user. Services like QEMU Guest Agent or SSHd often run as a system
