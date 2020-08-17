@@ -1,2 +1,2 @@
-ACTION=="add", SUBSYSTEM=="misc", KERNEL=="uinput", MODE="0660", GROUP="uinput"
+SUBSYSTEM=="misc", KERNEL=="uinput", OPTIONS+="static_node=uinput", MODE="0660", GROUP="uinput"
 ACTION=="add", SUBSYSTEM=="input", DEVPATH=="/devices/virtual/input/*", MODE="0666", GROUP="users"

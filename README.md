@@ -87,8 +87,6 @@ on the host, but may not be optimal for performance. The other routing modes use
 
 To use the `virtio-host` or `input-linux` routing modes, `screenstub` needs
 access to `/dev/uinput` and the virtual `/dev/input/event*` devices.
-The uinput driver [needs to be loaded](https://github.com/chrippa/ds4drv/issues/93#issuecomment-265300511)
-by [configuring modprobe](samples/modules-load.d/uinput.conf) or similar.
 [udev rules](samples/udev/rules.d/99-uinput.rules) can be used to set up device
 permissions. Additional rules may be included for any external devices you want
 to "grab" and forward to the guest.
