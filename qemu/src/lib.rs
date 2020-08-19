@@ -124,7 +124,7 @@ impl Qemu {
         let path = format!("/machine/peripheral/{}", id);
         let exists = match qmp.execute(qapi::qmp::qom_list { path }).await {
             Ok(_) => true,
-            Err(qapi::ExecuteError::Qapi(e)) if matches!(e.class, qapi::ErrorClass::DeviceNotFound) => false,
+            Err(qapi::ExecuteError::Qapi(qapi::Error { class: qapi::ErrorClass::DeviceNotFound, .. })) => false,
             Err(e) => return Err(e.into()),
         };
         if exists {

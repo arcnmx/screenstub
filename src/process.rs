@@ -342,10 +342,9 @@ impl Process {
             },
             ConfigEvent::Exit => {
                 let exit_events: Vec<_> = self.exit_events.iter()
-                    .filter_map(|e| if matches!(e, ConfigEvent::Exit) {
-                        None
-                    } else {
-                        Some(e)
+                    .filter_map(|e| match e {
+                        ConfigEvent::Exit => None,
+                        e => Some(e),
                     }).map(|e| self.process_user_event(e))
                     .chain(std::iter::once(self.xreq(XRequest::Quit)))
                     .collect();

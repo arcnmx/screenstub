@@ -121,7 +121,7 @@ impl RouteQmp {
                 if !cmd.events.is_empty() {
                     match qmp.execute(&cmd).await {
                         Ok(_) => (),
-                        Err(qapi::ExecuteError::Qapi(e)) if matches!(e.class, qapi::ErrorClass::GenericError) =>
+                        Err(qapi::ExecuteError::Qapi(e @ qapi::Error { class: qapi::ErrorClass::GenericError, .. })) =>
                             warn!("QMP input routing error: {:?}", e),
                         Err(e) => return Err(e.into()),
                     }
