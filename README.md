@@ -20,7 +20,7 @@ something like Synergy.
 3. [Configure](#configuration) screenstub by modifying the example as necessary,
    and setting up [the QEMU sockets](#qemu-control-sockets).
 
-Additional advanced configuration may be required:
+Additional configuration may be required for advanced usage:
 
 1. Install and set up [qemu-ga to run on Windows startup](#qemu-guest-agent).
 2. Install a [command-line DDC/CI program in Windows](#windows).
