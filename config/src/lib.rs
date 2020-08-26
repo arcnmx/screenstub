@@ -253,12 +253,35 @@ impl ConfigInputEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ConfigInputDevice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u16>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_id: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<u16>,
+    // pub kind (keyboard, mouse, tablet, etc)
+}
+
+fn true_() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ConfigGrab {
-    XCore,
-    XInput,
-    XDevice {
-        devices: Vec<String>,
+    X {
+        #[serde(default = "true_")]
+        confine: bool,
+        #[serde(default = "true_")]
+        mouse: bool,
+        #[serde(default = "ConfigGrab::default_ignore", skip_serializing_if = "Vec::is_empty")]
+        ignore: Vec<ConfigInputEvent>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        devices: Vec<ConfigInputDevice>,
     },
     Evdev {
         #[serde(default)]
@@ -274,11 +297,13 @@ pub enum ConfigGrab {
 }
 
 impl ConfigGrab {
+    fn default_ignore() -> Vec<ConfigInputEvent> {
+        vec![ConfigInputEvent::Absolute]
+    }
+
     pub fn mode(&self) -> ConfigGrabMode {
         match *self {
-            ConfigGrab::XCore => ConfigGrabMode::XCore,
-            ConfigGrab::XInput => ConfigGrabMode::XInput,
-            ConfigGrab::XDevice { .. } => ConfigGrabMode::XDevice,
+            ConfigGrab::X { .. } => ConfigGrabMode::X,
             ConfigGrab::Evdev { .. } => ConfigGrabMode::Evdev,
         }
     }
@@ -286,7 +311,12 @@ impl ConfigGrab {
 
 impl Default for ConfigGrab {
     fn default() -> Self {
-        ConfigGrab::XCore
+        ConfigGrab::X {
+            confine: true,
+            mouse: true,
+            ignore: Self::default_ignore(),
+            devices: Default::default(),
+        }
     }
 }
 
@@ -294,14 +324,12 @@ impl Default for ConfigGrab {
 #[serde(rename_all = "lowercase")]
 pub enum ConfigGrabMode {
     Evdev,
-    XDevice,
-    XCore,
-    XInput,
+    X,
 }
 
 impl Default for ConfigGrabMode {
     fn default() -> Self {
-        ConfigGrabMode::XCore
+        ConfigGrabMode::X
     }
 }
 

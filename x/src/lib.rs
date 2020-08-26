@@ -73,7 +73,9 @@ pub enum XRequest {
     UnstickHost,
     Grab {
         xcore: bool,
+        confine: bool,
         motion: bool,
+        devices: Vec<()>,
     },
     Ungrab,
 }
@@ -93,6 +95,7 @@ pub struct XContext {
     keys: xcore::GetKeyboardMappingReply,
     mods: xcore::GetModifierMappingReply,
     devices: BTreeMap<xinput::DeviceId, xinput::XIDeviceInfo>,
+    valuators: BTreeMap<(xinput::DeviceId, u16), xinput::DeviceClassDataValuator>,
     state: XState,
     display: xserver::Display,
 
@@ -203,6 +206,7 @@ impl XContext {
             setup,
             state: Default::default(),
             devices: Default::default(),
+            valuators: Default::default(),
             event_queue: Default::default(),
             ext_input,
             ext_test,
@@ -392,7 +396,7 @@ impl XContext {
                     }
                 }
             },
-            XRequest::Grab { xcore, motion } => {
+            XRequest::Grab { xcore, motion, confine, ref devices } => {
                 if xcore {
                     let status = self.sink.execute(xcore::GrabKeyboardRequest {
                         owner_events: false, // I don't quite understand how this works
@@ -409,7 +413,11 @@ impl XContext {
                         event_mask: (xcore::EventMask::ButtonPress | xcore::EventMask::ButtonRelease | xcore::EventMask::PointerMotion | xcore::EventMask::ButtonMotion).as_(),
                         pointer_mode: xcore::GrabMode::Async.into(),
                         keyboard_mode: xcore::GrabMode::Async.into(),
-                        confine_to: self.window.into(),
+                        confine_to: if confine {
+                            self.window.into()
+                        } else {
+                            xcore::WindowEnum::None.into()
+                        },
                         cursor: xcore::CursorEnum::None.into(),
                         time: xcore::Time::CurrentTime.into(),
                     }).await.await?;
@@ -478,6 +486,13 @@ impl XContext {
             deviceid: xinput::Device::All.into(),
         }).await.await?.infos
             .into_iter().map(|info| (info.deviceid.value(), info)).collect();
+
+        for (_, device) in &self.devices {
+            self.valuators = device.classes.iter().filter_map(|class| match class.data {
+                xinput::DeviceClassData::Valuator(val) => Some(((device.deviceid.value(), val.number), val)),
+                _ => None,
+            }).collect();
+        }
 
         Ok(())
     }
@@ -627,21 +642,40 @@ impl XContext {
                 };
                 self.convert_x_events(&event)
             },
+            /*ExtensionEvent::Input(e @ xinput::Events::KeyPress(..)) | ExtensionEvent::Input(e @ xinput::Events::KeyRelease(..)) => {
+                let (pressed, event) = match e {
+                    xinput::Events::KeyPress(event) => (true, event),
+                    xinput::Events::KeyRelease(event) => (false, &event.0),
+                    _ => unsafe { core::hint::unreachable_unchecked() },
+                };
+
+                if !event.flags.get().contains(xinput::KeyEventFlags::KeyRepeat) {
+                    let keycode = self.keycode(event.detail as _);
+                    let keysym = self.keysym(keycode);
+
+                    let event = XInputEvent {
+                        time: event.time.value(),
+                        data: XInputEventData::Key {
+                            pressed,
+                            keycode,
+                            keysym: if keysym == Some(0) { None } else { keysym },
+                            state: event.state.into(),
+                        },
+                    };
+                    self.convert_x_events(&event)
+                }
+            },*/
             ExtensionEvent::Input(xinput::Events::RawMotion(event)) => {
                 let event = &event.0;
                 let axis_info = self.valuator_info(event.deviceid.value())
                     .ok_or_else(|| format_err!("XInput device unknown for event: {:?}", event))?;
                 // TODO: could be relative or abs?
-                let valuators: BTreeMap<_, _> = axis_info.classes.iter().filter_map(|class| match class.data {
-                    xinput::DeviceClassData::Valuator(val) => Some((val.number as usize, val)),
-                    _ => None,
-                }).collect(); // TODO: do we need to index by val.number?
                 // TODO: figure out which axis are scroll wheels via ScrollClass - there are multiple entries per valuator?
                 let mut values = event.axisvalues.iter().zip(&event.axisvalues_raw);
                 for &valuator_mask in &event.valuator_mask {
                     for axis in iter_bits(valuator_mask)/*.zip(&mut values)*/ {
                         let (value, value_raw) = values.next().unwrap();
-                        let valuator = match valuators.get(&axis) {
+                        let valuator = match self.valuators.get(&(event.deviceid.value(), axis as u16)) {
                             Some(val) => val,
                             _ => continue,
                         };
