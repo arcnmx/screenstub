@@ -256,6 +256,7 @@ impl ConfigInputEvent {
 #[serde(rename_all = "lowercase")]
 pub enum ConfigGrab {
     XCore,
+    XInput,
     XDevice {
         devices: Vec<String>,
     },
@@ -276,6 +277,7 @@ impl ConfigGrab {
     pub fn mode(&self) -> ConfigGrabMode {
         match *self {
             ConfigGrab::XCore => ConfigGrabMode::XCore,
+            ConfigGrab::XInput => ConfigGrabMode::XInput,
             ConfigGrab::XDevice { .. } => ConfigGrabMode::XDevice,
             ConfigGrab::Evdev { .. } => ConfigGrabMode::Evdev,
         }
@@ -294,6 +296,7 @@ pub enum ConfigGrabMode {
     Evdev,
     XDevice,
     XCore,
+    XInput,
 }
 
 impl Default for ConfigGrabMode {

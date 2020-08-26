@@ -115,32 +115,13 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
 
     match matches.subcommand() {
         ("x", Some(..)) => {
+            let (x_sender, mut x_receiver) = mpsc::channel(0x20);
+            let (mut xreq_sender, xreq_receiver) = mpsc::channel(0x08);
             let xinstance = screen.x_instance.unwrap_or("auto".into());
-
-            let (mut x_sender, mut x_receiver) = mpsc::channel(0x20);
-            let (mut xreq_sender, mut xreq_receiver) = mpsc::channel(0x08);
-            let x = x::XContext::xmain("screenstub", &xinstance, "screenstub")?;
             let xmain = tokio::spawn(async move {
-                let mut x = x.fuse();
-                loop {
-                    futures::select! {
-                        req = xreq_receiver.next() => if let Some(req) = req {
-                            let _ = x.send(req).await;
-                        },
-                        event = x.next() => match event {
-                            Some(Ok(event)) => {
-                                let _ = x_sender.send(event).await;
-                            },
-                            Some(Err(e)) => {
-                                error!("X Error: {}: {:?}", e, e);
-                                break
-                            },
-                            None => {
-                                break
-                            },
-                        },
-                        complete => break,
-                    }
+                let x = x::XContext::xmain("screenstub", &xinstance, "screenstub", xreq_receiver, x_sender);
+                if let Err(e) = x.await {
+                    error!("X Error: {}: {:?}", e, e);
                 }
             }).map_err(From::from);
 

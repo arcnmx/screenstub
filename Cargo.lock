@@ -479,6 +479,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gethostname"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e692e296bfac1d2533ef168d0b60ff5897b8b70a4009276834014dd8924cc028"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "gimli"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -991,6 +1001,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "194d8e591e405d1eecf28819740abed6d719d1a2db87fc0bcdedee9a26d55560"
 
 [[package]]
+name = "roxmltree"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17dfc6c39f846bfc7d2ec442ad12055d79608d501380789b965d22f9354451f2"
+dependencies = [
+ "xmlparser",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1093,13 +1112,15 @@ dependencies = [
 name = "screenstub-x"
 version = "0.0.1"
 dependencies = [
+ "enumflags2",
  "failure",
  "futures",
  "input-linux",
  "log",
  "screenstub-fd",
  "tokio",
- "xcb",
+ "xproto",
+ "xserver",
 ]
 
 [[package]]
@@ -1410,13 +1431,56 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
-name = "xcb"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62056f63138b39116f82a540c983cc11f1c90cd70b3d492a70c25eaa50bd22a6"
+name = "xcbgen"
+version = "0.0.0"
+source = "git+https://github.com/arcnmx/xproto-rs?branch=wip#fd3ba1383f0cd0c7b7079e352b81f07d9dd451e3"
 dependencies = [
- "libc",
- "log",
+ "once_cell",
+ "roxmltree",
+]
+
+[[package]]
+name = "xcodegen"
+version = "0.1.0"
+source = "git+https://github.com/arcnmx/xproto-rs?branch=wip#fd3ba1383f0cd0c7b7079e352b81f07d9dd451e3"
+dependencies = [
+ "enumflags2",
+ "roxmltree",
+ "xcbgen",
+]
+
+[[package]]
+name = "xmlparser"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "114ba2b24d2167ef6d67d7d04c8cc86522b87f490025f39f0303b7db5bf5e3d8"
+
+[[package]]
+name = "xproto"
+version = "0.1.0"
+source = "git+https://github.com/arcnmx/xproto-rs?branch=wip#fd3ba1383f0cd0c7b7079e352b81f07d9dd451e3"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "enumflags2",
+ "xcodegen",
+ "zerocopy",
+]
+
+[[package]]
+name = "xserver"
+version = "0.1.0"
+source = "git+https://github.com/arcnmx/xproto-rs?branch=wip#fd3ba1383f0cd0c7b7079e352b81f07d9dd451e3"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "enumflags2",
+ "futures",
+ "gethostname",
+ "tokio",
+ "tokio-util",
+ "xproto",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1426,4 +1490,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39f0c922f1a334134dc2f7a8b67dc5d25f0735263feec974345ff706bcf20b0d"
 dependencies = [
  "linked-hash-map",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6580539ad917b7c026220c4b3f2c08d52ce54d6ce0dc491e66002e35388fab46"
+dependencies = [
+ "byteorder",
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d498dbd1fd7beb83c86709ae1c33ca50942889473473d287d56ce4770a18edfb"
+dependencies = [
+ "proc-macro2",
+ "syn",
+ "synstructure",
 ]
