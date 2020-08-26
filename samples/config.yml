@@ -48,10 +48,10 @@ hotkeys: # Trigger various events on key combinations
   on_release: false # trigger on downpress of key
   global: false # optionally trigger even when not in focus # CURRENTLY UNIMPLEMENTED
   events: # Select which events to trigger with this hotkey
-  - toggle_grab: xcore # Standard Xorg window grab
-  #- toggle_grab:
-  #    xdevice: # CURRENTLY UNIMPLEMENTED
-  #      devices: # Only grab specific devices from Xorg
+  - toggle_grab:
+      x: # Standard Xorg window grab
+        mouse: true
+  #      devices: # Only grab specific devices from Xorg (CURRENTLY UNIMPLEMENTED)
   #      - "..."
   #- exec: [echo, hi] # Execute an arbitrary system command
   #- show_host # switch to the host display
@@ -64,7 +64,10 @@ hotkeys: # Trigger various events on key combinations
 - triggers: [Y]
   modifiers: [LeftMeta]
   events:
-  - toggle_grab: xcore # Confine input/mouse to window
+  - toggle_grab:
+      x: # Confine input/mouse to window
+        mouse: false
+        ignore: []
   - toggle_grab:
       evdev: # evdev grab is useful for playing games that don't work with absolute mouse events
         exclusive: false # grab exclusive access from the device(s)

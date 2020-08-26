@@ -152,13 +152,39 @@ impl Process {
         let mode = grab.mode();
 
         match *grab {
-            ConfigGrab::XCore => {
-                self.grabs.lock().unwrap().insert(mode, GrabHandle {
-                    grab: None,
-                    x_filter: Default::default(),
-                    is_mouse: false,
+            ConfigGrab::X { confine, mouse, ref ignore, ref devices } => {
+                let qemu = self.qemu.clone();
+                let grabs = self.grabs.clone();
+                let routing = self.routing;
+                let driver_relative = self.driver_relative;
+                let driver_absolute = self.driver_absolute;
+                let prev_is_mouse = self.is_mouse();
+                let ignore = ignore.clone();
+                let x_filter = self.x_input_filter.clone();
+
+                let grab = self.xreq(XRequest::Grab {
+                    xcore: confine,
+                    confine,
+                    motion: mouse,
+                    devices: devices.iter().map(|_| unimplemented!()).collect(),
                 });
-                self.xreq(XRequest::Grab)
+                async move {
+                    grab.await?;
+
+                    x_filter.set_filter(ignore.iter().cloned());
+
+                    grabs.lock().unwrap().insert(mode, GrabHandle {
+                        grab: None,
+                        x_filter: ignore,
+                        is_mouse: mouse,
+                    });
+
+                    if mouse && !prev_is_mouse {
+                        Self::set_is_mouse_cmd(qemu, routing, driver_relative, driver_absolute, mouse).await?;
+                    }
+
+                    Ok(())
+                }.boxed()
             },
             ConfigGrab::Evdev { exclusive, ref new_device_name, ref xcore_ignore, ref evdev_ignore, ref devices } => {
                 let qemu = self.qemu.clone();
@@ -243,9 +269,23 @@ impl Process {
 
     fn ungrab(&self, grab: ConfigGrabMode) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
         match grab {
-            ConfigGrabMode::XCore => {
-                self.grabs.lock().unwrap().remove(&grab);
-                self.xreq(XRequest::Ungrab)
+            ConfigGrabMode::X { .. } => {
+                let ungrab = self.xreq(XRequest::Ungrab);
+                let grab = self.grabs.lock().unwrap().remove(&grab);
+                if let Some(mut grab) = grab {
+                    self.x_input_filter.unset_filter(grab.x_filter.drain(..));
+                    if grab.is_mouse && !self.is_mouse() {
+                        let set = self.set_is_mouse(false);
+                        async move {
+                            set.await?;
+                            ungrab.await
+                        }.boxed()
+                    } else {
+                        ungrab
+                    }
+                } else {
+                    ungrab
+                }
             },
             ConfigGrabMode::Evdev => {
                 let grab = self.grabs.lock().unwrap().remove(&grab);

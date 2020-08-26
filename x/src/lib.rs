@@ -54,7 +54,12 @@ pub enum XEvent {
 pub enum XRequest {
     Quit,
     UnstickHost,
-    Grab,
+    Grab {
+        xcore: bool,
+        confine: bool,
+        motion: bool,
+        devices: Vec<()>,
+    },
     Ungrab,
 }
 
@@ -325,26 +330,28 @@ impl XContext {
                     }
                 }
             },
-            XRequest::Grab => {
-                let status = xcb::grab_keyboard(&self.conn,
-                    false, // owner_events, I don't quite understand how this works
-                    self.window,
-                    xcb::CURRENT_TIME,
-                    xcb::GRAB_MODE_ASYNC as _,
-                    xcb::GRAB_MODE_ASYNC as _,
-                ).get_reply()?.status();
-                self.handle_grab_status(status)?;
-                let status = xcb::grab_pointer(&self.conn,
-                    false, // owner_events, I don't quite understand how this works
-                    self.window,
-                    (xcb::EVENT_MASK_BUTTON_PRESS | xcb::EVENT_MASK_BUTTON_RELEASE | xcb::EVENT_MASK_POINTER_MOTION | xcb::EVENT_MASK_BUTTON_MOTION) as _,
-                    xcb::GRAB_MODE_ASYNC as _,
-                    xcb::GRAB_MODE_ASYNC as _,
-                    self.window, // confine mouse to our window
-                    xcb::NONE,
-                    xcb::CURRENT_TIME,
-                ).get_reply()?.status();
-                self.handle_grab_status(status)?;
+            XRequest::Grab { xcore, motion, confine, ref devices } => {
+                if xcore {
+                    let status = xcb::grab_keyboard(&self.conn,
+                        false, // owner_events, I don't quite understand how this works
+                        self.window,
+                        xcb::CURRENT_TIME,
+                        xcb::GRAB_MODE_ASYNC as _,
+                        xcb::GRAB_MODE_ASYNC as _,
+                    ).get_reply()?.status();
+                    self.handle_grab_status(status)?;
+                    let status = xcb::grab_pointer(&self.conn,
+                        false, // owner_events, I don't quite understand how this works
+                        self.window,
+                        (xcb::EVENT_MASK_BUTTON_PRESS | xcb::EVENT_MASK_BUTTON_RELEASE | xcb::EVENT_MASK_POINTER_MOTION | xcb::EVENT_MASK_BUTTON_MOTION) as _,
+                        xcb::GRAB_MODE_ASYNC as _,
+                        xcb::GRAB_MODE_ASYNC as _,
+                        if confine { self.window } else { xcb::NONE }, // confine mouse to our window
+                        xcb::NONE,
+                        xcb::CURRENT_TIME,
+                    ).get_reply()?.status();
+                    self.handle_grab_status(status)?;
+                }
             },
             XRequest::Ungrab => {
                 xcb::ungrab_keyboard(&self.conn, xcb::CURRENT_TIME).request_check()?;
