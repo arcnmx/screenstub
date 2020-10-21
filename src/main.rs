@@ -113,7 +113,7 @@ async fn main_result() -> Result<i32, Error> {
 
             let (mut x_sender, mut x_receiver) = mpsc::channel(0x20);
             let (mut xreq_sender, mut xreq_receiver) = mpsc::channel(0x08);
-            let x = x::XContext::xmain("screenstub", "screenstub", &xinstance)?;
+            let x = x::XContext::xmain("screenstub", &xinstance, "screenstub")?;
             let xmain = tokio::spawn(async move {
                 let mut x = x.fuse();
                 loop {

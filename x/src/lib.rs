@@ -155,9 +155,9 @@ impl XContext {
         Ok(())
     }
 
-    pub fn set_wm_class(&self, class: &str, instance: &str) -> Result<(), Error> {
+    pub fn set_wm_class(&self, instance: &str, class: &str) -> Result<(), Error> {
         // TODO: ensure neither class or instance contain nul byte
-        let wm_class_string = format!("{}\0{}", class, instance);
+        let wm_class_string = format!("{}\0{}", instance, class);
 
         xcb::change_property(&self.conn,
             xcb::PROP_MODE_REPLACE as _,
@@ -281,11 +281,11 @@ impl XContext {
         }
     }
 
-    pub fn xmain(name: &str, class: &str, instance: &str) -> Result<Self, Error> {
+    pub fn xmain(name: &str, instance: &str, class: &str) -> Result<Self, Error> {
         let mut xcontext = Self::connect()?;
         xcontext.state.running = true;
         xcontext.set_wm_name(name)?;
-        xcontext.set_wm_class(class, instance)?;
+        xcontext.set_wm_class(instance, class)?;
         xcontext.map_window()?;
         Ok(xcontext)
     }
