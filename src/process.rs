@@ -222,7 +222,7 @@ impl Process {
                         is_mouse,
                     });
 
-                    if prev_is_mouse != is_mouse {
+                    if is_mouse && !prev_is_mouse {
                         Self::set_is_mouse_cmd(qemu, routing, driver_relative, driver_absolute, is_mouse).await?;
                     }
                     Ok(())
@@ -234,7 +234,7 @@ impl Process {
 
     pub fn is_mouse(&self) -> bool {
         // TODO: no grabs doesn't necessarily mean absolute mode...
-        self.grabs.try_lock().unwrap().iter().map(|(_, g)| g.is_mouse).next().unwrap_or(false)
+        self.grabs.try_lock().unwrap().iter().any(|(_, g)| g.is_mouse)
     }
 
     fn ungrab(&self, grab: ConfigGrabMode) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
@@ -244,9 +244,10 @@ impl Process {
                 self.xreq(XRequest::Ungrab)
             },
             ConfigGrabMode::Evdev => {
-                if let Some(mut grab) = self.grabs.try_lock().unwrap().remove(&grab) {
+                let grab = self.grabs.try_lock().unwrap().remove(&grab);
+                if let Some(mut grab) = grab {
                     self.x_input_filter.unset_filter(grab.x_filter.drain(..));
-                    if grab.is_mouse {
+                    if grab.is_mouse && !self.is_mouse() {
                         self.set_is_mouse(false).boxed()
                     } else {
                         future::ok(()).boxed()
