@@ -1,7 +1,8 @@
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::fs::File;
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::{mem, slice};
 use std::task::{Poll, Context};
 use std::pin::Pin;
@@ -13,14 +14,13 @@ use input_linux::{
     AbsoluteInfoSetup, AbsoluteInfo, Bitmask,
     EventCodec,
 };
-use tokio::io::{AsyncRead, AsyncWrite, PollEvented};
 use tokio_util::codec::{Decoder, Encoder};
-use tokio_fd::{Fd, o_nonblock};
+use tokio::io::unix::AsyncFd;
 use futures::{Sink, Stream, ready};
-use bytes::BytesMut;
+use bytes::{BytesMut, BufMut};
 use log::{trace, debug};
 
-pub type EvdevHandle<'a> = input_linux::EvdevHandle<&'a Fd<File>>;
+pub type EvdevHandle<'a> = input_linux::EvdevHandle<FdRef<'a, AsyncFd<RawFd>>>;
 
 #[derive(Debug, Default, Clone)]
 pub struct Builder {
@@ -36,6 +36,27 @@ pub struct Builder {
     bits_led: Bitmask<input::LedKind>,
     bits_sound: Bitmask<input::SoundKind>,
     bits_switch: Bitmask<input::SwitchKind>,
+}
+
+fn o_nonblock() -> OpenOptions {
+    let mut o = OpenOptions::new();
+    o.custom_flags(libc::O_NONBLOCK);
+    o
+}
+
+fn io_poll<T>(res: io::Result<T>) -> Poll<io::Result<T>> {
+    match res {
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+        res => Poll::Ready(res),
+    }
+}
+
+pub struct FdRef<'a, T>(&'a T);
+
+impl<'a, T: AsRawFd> AsRawFd for FdRef<'a, T> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
 }
 
 impl Builder {
@@ -140,9 +161,10 @@ impl Builder {
         let mut open = o_nonblock();
         open.read(true);
         open.write(true);
-        let fd = Fd::new(open.open(FILENAME)?);
+        let file = open.open(FILENAME)?;
+        let fd = AsyncFd::new(file.as_raw_fd())?;
 
-        let handle = UInputHandle::new(&fd);
+        let handle = UInputHandle::new(FdRef(&file));
 
         debug!("UInput props {:?}", self.bits_props);
         for bit in &self.bits_props {
@@ -194,13 +216,15 @@ impl Builder {
         Ok(UInput {
             path: handle.evdev_path()?,
             fd,
+            file,
         })
     }
 }
 
 #[derive(Debug)]
 pub struct UInput {
-    pub fd: Fd<File>,
+    pub fd: AsyncFd<RawFd>,
+    pub file: File,
     pub path: PathBuf,
 }
 
@@ -210,21 +234,19 @@ impl UInput {
     }
 
     pub fn write_events(&mut self, events: &[InputEvent]) -> io::Result<usize> {
-        UInputHandle::new(&self.fd).write(unsafe { mem::transmute(events) })
+        UInputHandle::new(FdRef(&self.fd)).write(unsafe { mem::transmute(events) })
     }
 
     pub fn write_event(&mut self, event: &InputEvent) -> io::Result<usize> {
-        let events = unsafe { slice::from_raw_parts(event as *const _, 1) };
-        self.write_events(events)
+        self.write_events(slice::from_ref(event))
     }
 
     pub fn to_sink(self) -> io::Result<UInputSink> {
-        let fd = Some(PollEvented::new(self.fd)?);
         //let uinput_write = FramedWrite::new(uinput_f, input::EventCodec::new());
 
         Ok(UInputSink {
-            fd,
-            buffer_write: Default::default(),
+            fd: Some((self.fd, self.file)),
+            buffer_write: BytesMut::with_capacity(mem::size_of::<InputEvent>() * 32),
             buffer_read: Default::default(),
             codec: EventCodec::new(),
         })
@@ -233,7 +255,8 @@ impl UInput {
 
 #[derive(Debug)]
 pub struct Evdev {
-    pub fd: Fd<File>,
+    fd: AsyncFd<RawFd>,
+    file: File,
 }
 
 impl Evdev {
@@ -242,25 +265,25 @@ impl Evdev {
         let mut open = o_nonblock();
         open.read(true);
         open.write(true);
-        let f = open.open(path)?;
+        let file = open.open(path)?;
 
         Ok(Evdev {
-            fd: Fd::new(f),
+            fd: AsyncFd::new(file.as_raw_fd())?,
+            file,
         })
     }
 
     pub fn evdev(&self) -> EvdevHandle {
-        EvdevHandle::new(&self.fd)
+        EvdevHandle::new(FdRef(&self.fd))
     }
 
     pub fn to_sink(self) -> io::Result<UInputSink> {
-        let fd = Some(PollEvented::new(self.fd)?);
         //let uinput_write = FramedWrite::new(uinput_f, input::EventCodec::new());
 
         Ok(UInputSink {
-            fd,
+            fd: Some((self.fd, self.file)),
             buffer_write: Default::default(),
-            buffer_read: Default::default(),
+            buffer_read: BytesMut::with_capacity(mem::size_of::<InputEvent>() * 32),
             codec: EventCodec::new(),
         })
     }
@@ -268,7 +291,7 @@ impl Evdev {
 
 //#[derive(Debug)]
 pub struct UInputSink {
-    fd: Option<PollEvented<Fd<File>>>,
+    fd: Option<(AsyncFd<RawFd>, File)>,
     buffer_write: BytesMut,
     buffer_read: BytesMut,
     codec: EventCodec,
@@ -276,9 +299,40 @@ pub struct UInputSink {
 
 impl UInputSink {
     pub fn evdev(&self) -> Option<EvdevHandle> {
-        self.fd.as_ref().map(|fd|
-            EvdevHandle::new(fd.get_ref())
+        self.fd.as_ref().map(|(fd, _)|
+            EvdevHandle::new(FdRef(fd))
         )
+    }
+
+    fn write_events(file: &mut File, buffer_write: &mut BytesMut) -> io::Result<usize> {
+        if buffer_write.is_empty() {
+            return Ok(0)
+        }
+
+        let n = file.write(buffer_write)?;
+
+        if n == 0 {
+            Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write to uinput"))
+        } else {
+            let _ = buffer_write.split_to(n);
+
+            Ok(n)
+        }
+    }
+
+    fn read_events(file: &mut File, buffer_read: &mut BytesMut) -> io::Result<usize> {
+        buffer_read.reserve(mem::size_of::<InputEvent>());
+        unsafe {
+            let n = {
+                let buffer = buffer_read.bytes_mut();
+                debug_assert_eq!(buffer.len() % mem::size_of::<InputEvent>(), 0);
+                let buffer = slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len());
+                file.read(buffer)
+            }?;
+            buffer_read.advance_mut(n);
+
+            Ok(n)
+        }
     }
 }
 
@@ -289,52 +343,71 @@ impl Sink<InputEvent> for UInputSink {
         trace!("UInputSink start_send({:?})", item);
 
         let this = unsafe { self.get_unchecked_mut() };
-        this.codec.encode(item, &mut this.buffer_write)?;
+        if let Some((_, file)) = this.fd.as_mut() {
+            this.codec.encode(item, &mut this.buffer_write)?;
 
-        // TODO: poll_ready in here to start the write?
+            // attempt a single non-blocking write
+            match io_poll(Self::write_events(file, &mut this.buffer_write)) {
+                Poll::Ready(Err(e)) => return Err(e),
+                _ => (),
+            }
 
-        Ok(())
+            Ok(())
+        } else {
+            Err(io::Error::new(io::ErrorKind::UnexpectedEof, "uinput fd is closed"))
+        }
     }
 
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         trace!("UInputSink poll_ready");
 
-        // TODO: force full flush if buffer is over a certain amount, otherwise proceed?
-
-        self.poll_flush(cx)
+        let this = unsafe { self.as_mut().get_unchecked_mut() };
+        if this.fd.is_some() {
+            if this.buffer_write.len() > mem::size_of::<InputEvent>() * 8 {
+                self.poll_flush(cx)
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        } else {
+            Poll::Ready(
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "uinput fd is closed"))
+            )
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         trace!("UInputSink poll_flush");
 
         let this = unsafe { self.get_unchecked_mut() };
-        if let Some(mut fd) = Pin::new(&mut this.fd).as_pin_mut() {
+        if let Some((fd, file)) = this.fd.as_mut() {
             while !this.buffer_write.is_empty() {
-                let n = ready!(fd.as_mut().poll_write(cx, &this.buffer_write))?;
-
-                if n == 0 {
-                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write to uinput")))
+                let mut ready = ready!(fd.poll_write_ready(cx))?;
+                let buffer = &mut this.buffer_write;
+                match ready.with_poll(|| io_poll(
+                    Self::write_events(file, buffer)
+                )) {
+                    Poll::Pending => continue,
+                    Poll::Ready(n) => {
+                        n?;
+                    },
                 }
-
-                let _ = this.buffer_write.split_to(n);
             }
 
-            fd.poll_flush(cx)
-        } else {
             Poll::Ready(Ok(()))
+        } else if this.buffer_write.is_empty() {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Ready(
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "uinput fd is closed"))
+            )
         }
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         trace!("UInputSink poll_close");
 
-        ready!(self.as_mut().poll_flush(cx))?;
+        let res = self.as_mut().poll_flush(cx);
 
-        let res = if let Some(fd) = unsafe { self.as_mut().map_unchecked_mut(|this| &mut this.fd).as_pin_mut() } {
-            fd.poll_shutdown(cx)
-        } else {
-            Poll::Ready(Ok(()))
-        };
         if res.is_ready() {
             self.fd = None;
         }
@@ -350,13 +423,20 @@ impl Stream for UInputSink {
 
         let this = unsafe { self.get_unchecked_mut() };
         loop {
-            if let Some(fd) = Pin::new(&mut this.fd).as_pin_mut() {
+            if let Some((fd, file)) = this.fd.as_mut() {
                 if let Some(frame) = this.codec.decode(&mut this.buffer_read)? {
                     return Poll::Ready(Some(Ok(frame)))
                 }
 
-                this.buffer_read.reserve(mem::size_of::<InputEvent>() * 8);
-                if ready!(fd.poll_read_buf(cx, &mut this.buffer_read))? == 0 {
+                let mut ready = ready!(fd.poll_read_ready(cx))?;
+                let buffer = &mut this.buffer_read;
+                let n = match ready.with_poll(|| io_poll(
+                    Self::read_events(file, buffer)
+                )) {
+                    Poll::Pending => continue,
+                    Poll::Ready(n) => n?,
+                };
+                if n == 0 {
                     this.fd = None;
                 }
             } else {

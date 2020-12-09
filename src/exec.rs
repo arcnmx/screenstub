@@ -12,7 +12,7 @@ impl Builder {
     pub fn into_future(self) -> impl Future<Output=Result<(), Error>> + Send + 'static {
         async move {
             if let Some(mut child) = self.child {
-                exit_status_error(child.spawn()?.await?)
+                exit_status_error(child.status().await?)
             } else {
                 Err(format_err!("Missing exec command"))
             }

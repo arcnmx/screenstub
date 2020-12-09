@@ -4,7 +4,7 @@ version = "0.0.1"
 edition = "2018"
 
 [dependencies]
-input-linux = "^0.3.0"
+input-linux = "^0.4.0"
 smallvec = "^1.4.1"
 screenstub-x = { path = "../x" }
 log = "^0.4.1"

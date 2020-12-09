@@ -3,7 +3,9 @@ pub extern crate xcb;
 use futures::{Sink, Stream, ready};
 use failure::{Error, format_err};
 use input_linux::{InputEvent, EventTime, KeyEvent, KeyState, Key, AbsoluteEvent, AbsoluteAxis, SynchronizeEvent};
-use tokio::io::Registration;
+use tokio::io::unix::AsyncFd;
+use tokio::io::Interest;
+use std::os::unix::io::RawFd;
 use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
 use log::{trace, warn, info};
@@ -58,7 +60,7 @@ pub enum XRequest {
 
 pub struct XContext {
     conn: xcb::Connection,
-    fd: Registration,
+    fd: AsyncFd<RawFd>,
     window: u32,
 
     keys: xcb::GetKeyboardMappingReply,
@@ -83,8 +85,7 @@ impl XContext {
         let (conn, screen_num) = xcb::Connection::connect(None)?;
         let fd = {
             let fd = unsafe { xcb::ffi::base::xcb_get_file_descriptor(conn.get_raw_conn()) };
-            let fd = mio::unix::EventedFd(&fd);
-            Registration::new_with_ready(&fd, mio::Ready::readable())
+            AsyncFd::with_interest(fd, Interest::READABLE)
         }?;
         let window = conn.generate_id();
         let (keys, mods) = {
@@ -618,8 +619,15 @@ impl Stream for XContext {
                             this.stop_waker = Some(cx.waker().clone());
                             return Poll::Pending
                         },
-                        Poll::Ready(r) => {
-                            r?;
+                        Poll::Ready(ready) => {
+                            let mut ready = ready?;
+                            if let Some(event) = this.conn.poll_for_event() {
+                                // poll returned None, so we know next_event is empty
+                                this.next_event = Some(event);
+                                ready.retain_ready()
+                            } else {
+                                ready.clear_ready()
+                            }
                         },
                     }
                 },

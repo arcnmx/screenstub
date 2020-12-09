@@ -43,7 +43,7 @@ type Events = event::Events<Arc<ConfigEvent>>;
 const EVENT_BUFFER: usize = 8;
 
 fn main() {
-    let mut runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
     let spawner = Arc::new(Spawner::new());
 
     let code = match runtime.block_on(main_result(&spawner)) {

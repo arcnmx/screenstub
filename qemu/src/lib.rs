@@ -5,7 +5,7 @@ use failure::{Error, format_err};
 use futures::{TryFutureExt, StreamExt};
 use futures::future;
 use tokio::net::UnixStream;
-use tokio::time::{Duration, Instant, delay_for, timeout};
+use tokio::time::{Duration, Instant, sleep, timeout};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::broadcast;
 use log::{trace, warn, info};
@@ -133,23 +133,23 @@ impl Qemu {
                 .map_err(Error::from)
                 .map_ok(drop);
             let wait = async move {
-                while let Some(e) = events.next().await {
-                    match e? {
-                        qapi::qmp::Event::DEVICE_DELETED { ref data, .. } if data.device.as_ref() == Some(&id) => {
+                loop {
+                    match events.recv().await {
+                        Ok(qapi::qmp::Event::DEVICE_DELETED { ref data, .. }) if data.device.as_ref() == Some(&id) => {
                             // work around qemu bug. without this delay, device_add will work but the new device might be immediately deleted
-                            delay_for(Duration::from_millis(128)).await;
+                            sleep(Duration::from_millis(128)).await;
 
-                            return Ok(())
+                            break Ok(())
                         },
+                        Err(broadcast::error::RecvError::Closed) => break Err(format_err!("Expected DEVICE_DELETED event")),
                         _ => (),
                     }
                 }
-                Err(format_err!("Expected DEVICE_DELETED event"))
             };
             future::try_join(wait, delete).await?;
         }
 
-        tokio::time::delay_until(deadline).await;
+        tokio::time::sleep_until(deadline).await;
         qmp.execute(add).await?;
 
         Ok(())
@@ -164,7 +164,7 @@ impl Qemu {
             match qga.execute(exec).await {
                 Ok(qapi::qga::GuestExec { pid }) => loop {
                     match qga.execute(qapi::qga::guest_exec_status { pid }).await {
-                        Ok(r) if !r.exited => delay_for(Duration::from_millis(100)).await,
+                        Ok(r) if !r.exited => sleep(Duration::from_millis(100)).await,
                         res => break res.map_err(From::from),
                     }
                 },

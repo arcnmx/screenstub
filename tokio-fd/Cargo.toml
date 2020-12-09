@@ -1,6 +1,0 @@
-[package]
-name = "tokio-fd"
-version = "0.0.1"
-
-[dependencies]
-mio = "^0.6.13"

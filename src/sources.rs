@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use futures::lock::Mutex;
-use tokio::time::{Duration, Instant, delay_until};
+use tokio::time::{Duration, Instant, sleep_until};
 use failure::{Error, format_err};
 use qemu::Qemu;
 use config::{ConfigSource, ConfigMonitor, ConfigDdcMethod};
@@ -170,7 +170,7 @@ impl Sources {
             } else {
                 throttle_until
             };
-            delay_until(throttle_until).await;
+            sleep_until(throttle_until).await;
 
             let host = target_showing.load(Ordering::Relaxed);
             let guest = !host;

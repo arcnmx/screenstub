@@ -7,5 +7,5 @@ edition = "2018"
 futures = "^0.3.5"
 failure = "^0.1.1"
 log = "^0.4.1"
-tokio = { version = "^0.2.0", default-features = false, features = ["time", "sync"] }
-qapi = { version = "^0.6.0", features = ["qmp", "qga", "async-tokio-uds", "async-tokio-spawn"] }
+tokio = { version = "^0.3.3", default-features = false, features = ["time", "sync"] }
+qapi = { version = "^0.7.0", features = ["qmp", "qga", "async-tokio-net", "async-tokio-spawn"] }
