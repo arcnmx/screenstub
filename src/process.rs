@@ -18,6 +18,7 @@ use crate::grab::GrabEvdev;
 use crate::exec::exec;
 use x::XRequest;
 use crate::Events;
+use crate::spawner::Spawner;
 use log::{trace, info, error};
 
 pub struct GrabHandle {
@@ -49,6 +50,7 @@ pub struct Process {
     event_sender: un_mpsc::Sender<InputEvent>,
     error_sender: un_mpsc::Sender<Error>,
     uinput_id: Arc<InputId>,
+    spawner: Arc<Spawner>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -59,7 +61,7 @@ enum InputDevice {
 }
 
 impl Process {
-    pub fn new(routing: ConfigQemuRouting, driver_keyboard: ConfigQemuDriver, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, exit_events: Vec<config::ConfigEvent>, qemu: Arc<Qemu>, events: Arc<Events>, sources: Sources, xreq_sender: un_mpsc::Sender<XRequest>, event_sender: un_mpsc::Sender<InputEvent>, error_sender: un_mpsc::Sender<Error>) -> Self {
+    pub fn new(routing: ConfigQemuRouting, driver_keyboard: ConfigQemuDriver, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, exit_events: Vec<config::ConfigEvent>, qemu: Arc<Qemu>, events: Arc<Events>, sources: Sources, xreq_sender: un_mpsc::Sender<XRequest>, event_sender: un_mpsc::Sender<InputEvent>, error_sender: un_mpsc::Sender<Error>, spawner: Arc<Spawner>) -> Self {
         Process {
             routing,
             driver_keyboard,
@@ -80,6 +82,7 @@ impl Process {
                 product: 0x05df,
                 version: 1,
             }),
+            spawner,
         }
     }
 
@@ -170,6 +173,7 @@ impl Process {
                 let driver_relative = self.driver_relative;
                 let driver_absolute = self.driver_absolute;
                 let prev_is_mouse = self.is_mouse();
+                let spawner = self.spawner.clone();
                 let grab = GrabEvdev::new(devices, evdev_ignore.iter().cloned());
 
                 async move {
@@ -198,7 +202,7 @@ impl Process {
                             grab.grab(true)?;
                         }
 
-                        uinput.spawn(error_sender.clone())
+                        uinput.spawn(&spawner, error_sender.clone())
                     } else {
                         event_sender.unwrap()
                     };

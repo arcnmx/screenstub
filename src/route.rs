@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::path::Path;
 use std::task::Poll;
-use std::time::Duration;
 use std::sync::Once;
 use std::pin::Pin;
 use std::iter;
+use tokio::time::{Duration, Instant};
 use input::{InputEvent, EventRef, KeyEvent, Key, RelativeAxis, AbsoluteAxis};
 use futures::channel::mpsc;
 use futures::{StreamExt, SinkExt, Future, FutureExt, TryFutureExt};
@@ -15,6 +15,7 @@ use qapi::{qmp, Any};
 use qemu::Qemu;
 use uinput;
 use log::warn;
+use crate::spawner::Spawner;
 
 pub struct RouteQmp {
     qemu: Arc<Qemu>,
@@ -94,10 +95,10 @@ impl RouteQmp {
         e.into_iter().map(move |ref e| Self::convert_event(e, qkeycodes)).filter_map(|e| e)
     }
 
-    pub fn spawn(&self, mut events: mpsc::Receiver<InputEvent>, mut error_sender: mpsc::Sender<Error>) {
+    pub fn spawn(&self, spawner: &Spawner, mut events: mpsc::Receiver<InputEvent>, mut error_sender: mpsc::Sender<Error>) {
         let qemu = self.qemu.clone();
         let qkeycodes = self.qkeycodes.clone();
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let qmp = qemu.connect_qmp().await?;
             let mut cmd = qmp::input_send_event {
                 device: Default::default(),
@@ -186,7 +187,7 @@ impl UInputCommands for RouteUInputVirtio {
         let command = qmp::device_add::new(name, Some(self.id.clone()), self.bus.clone(), vec![
             ("evdev".into(), Any::String(path.display().to_string())),
         ]);
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(512); // HACK: wait for udev to see device and change permissions
+        let deadline = Instant::now() + Duration::from_millis(512); // HACK: wait for udev to see device and change permissions
         let qemu = qemu.clone();
         async move {
             qemu.device_add(command, deadline).await
@@ -244,11 +245,11 @@ impl<U> RouteUInput<U> {
 }
 
 impl<U: UInputCommands> RouteUInput<U> {
-    pub fn spawn(&self, mut events: mpsc::Receiver<InputEvent>, mut error_sender: mpsc::Sender<Error>) {
+    pub fn spawn(&self, spawner: &Spawner, mut events: mpsc::Receiver<InputEvent>, mut error_sender: mpsc::Sender<Error>) {
         let qemu = self.qemu.clone();
         let uinput = self.builder.create();
         let commands = self.commands.clone();
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let uinput = uinput?;
             let path = uinput.path().to_owned();
             let mut uinput = uinput.to_sink()?;
@@ -297,13 +298,13 @@ impl Route {
         }
     }
 
-    pub fn spawn(self, error_sender: mpsc::Sender<Error>) -> mpsc::Sender<InputEvent> {
+    pub fn spawn(self, spawner: &Spawner, error_sender: mpsc::Sender<Error>) -> mpsc::Sender<InputEvent> {
         let (sender, events) = mpsc::channel(crate::EVENT_BUFFER);
 
         match self {
-            Route::InputLinux(ref uinput) => uinput.spawn(events, error_sender),
-            Route::VirtioHost(ref uinput) => uinput.spawn(events, error_sender),
-            Route::Qmp(ref qmp) => qmp.spawn(events, error_sender),
+            Route::InputLinux(ref uinput) => uinput.spawn(spawner, events, error_sender),
+            Route::VirtioHost(ref uinput) => uinput.spawn(spawner, events, error_sender),
+            Route::Qmp(ref qmp) => qmp.spawn(spawner, events, error_sender),
         }
 
         sender
