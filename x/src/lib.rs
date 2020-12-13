@@ -5,10 +5,10 @@ use failure::{Error, format_err};
 use input_linux::{InputEvent, EventTime, KeyEvent, KeyState, Key, AbsoluteEvent, AbsoluteAxis, SynchronizeEvent};
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
-use std::os::unix::io::RawFd;
 use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
 use log::{trace, warn, info};
+use screenstub_fd::Fd;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct XState {
@@ -60,7 +60,7 @@ pub enum XRequest {
 
 pub struct XContext {
     conn: xcb::Connection,
-    fd: AsyncFd<RawFd>,
+    fd: AsyncFd<Fd>,
     window: u32,
 
     keys: xcb::GetKeyboardMappingReply,
@@ -85,7 +85,7 @@ impl XContext {
         let (conn, screen_num) = xcb::Connection::connect(None)?;
         let fd = {
             let fd = unsafe { xcb::ffi::base::xcb_get_file_descriptor(conn.get_raw_conn()) };
-            AsyncFd::with_interest(fd, Interest::READABLE)
+            AsyncFd::with_interest(fd.into(), Interest::READABLE)
         }?;
         let window = conn.generate_id();
         let (keys, mods) = {

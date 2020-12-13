@@ -1,4 +1,4 @@
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::fs::{File, OpenOptions};
@@ -6,6 +6,7 @@ use std::io::{self, Read, Write};
 use std::{mem, slice};
 use std::task::{Poll, Context};
 use std::pin::Pin;
+use screenstub_fd::{Fd, FdRef};
 use input_linux as input;
 use input_linux::{
     UInputHandle, InputId,
@@ -20,7 +21,7 @@ use futures::{Sink, Stream, ready};
 use bytes::{BytesMut, BufMut};
 use log::{trace, debug};
 
-pub type EvdevHandle<'a> = input_linux::EvdevHandle<FdRef<'a, AsyncFd<RawFd>>>;
+pub type EvdevHandle<'a> = input_linux::EvdevHandle<FdRef<'a, AsyncFd<Fd>>>;
 
 #[derive(Debug, Default, Clone)]
 pub struct Builder {
@@ -48,14 +49,6 @@ fn io_poll<T>(res: io::Result<T>) -> Poll<io::Result<T>> {
     match res {
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
         res => Poll::Ready(res),
-    }
-}
-
-pub struct FdRef<'a, T>(&'a T);
-
-impl<'a, T: AsRawFd> AsRawFd for FdRef<'a, T> {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
     }
 }
 
@@ -162,9 +155,9 @@ impl Builder {
         open.read(true);
         open.write(true);
         let file = open.open(FILENAME)?;
-        let fd = AsyncFd::new(file.as_raw_fd())?;
+        let fd = AsyncFd::new(file.as_raw_fd().into())?;
 
-        let handle = UInputHandle::new(FdRef(&file));
+        let handle = UInputHandle::new(Fd(&file));
 
         debug!("UInput props {:?}", self.bits_props);
         for bit in &self.bits_props {
@@ -223,7 +216,7 @@ impl Builder {
 
 #[derive(Debug)]
 pub struct UInput {
-    pub fd: AsyncFd<RawFd>,
+    pub fd: AsyncFd<Fd>,
     pub file: File,
     pub path: PathBuf,
 }
@@ -234,7 +227,7 @@ impl UInput {
     }
 
     pub fn write_events(&mut self, events: &[InputEvent]) -> io::Result<usize> {
-        UInputHandle::new(FdRef(&self.fd)).write(unsafe { mem::transmute(events) })
+        UInputHandle::new(Fd(&self.fd)).write(unsafe { mem::transmute(events) })
     }
 
     pub fn write_event(&mut self, event: &InputEvent) -> io::Result<usize> {
@@ -255,7 +248,7 @@ impl UInput {
 
 #[derive(Debug)]
 pub struct Evdev {
-    fd: AsyncFd<RawFd>,
+    fd: AsyncFd<Fd>,
     file: File,
 }
 
@@ -268,13 +261,13 @@ impl Evdev {
         let file = open.open(path)?;
 
         Ok(Evdev {
-            fd: AsyncFd::new(file.as_raw_fd())?,
+            fd: AsyncFd::new(file.as_raw_fd().into())?,
             file,
         })
     }
 
     pub fn evdev(&self) -> EvdevHandle {
-        EvdevHandle::new(FdRef(&self.fd))
+        EvdevHandle::new(Fd(&self.fd))
     }
 
     pub fn to_sink(self) -> io::Result<UInputSink> {
@@ -291,7 +284,7 @@ impl Evdev {
 
 //#[derive(Debug)]
 pub struct UInputSink {
-    fd: Option<(AsyncFd<RawFd>, File)>,
+    fd: Option<(AsyncFd<Fd>, File)>,
     buffer_write: BytesMut,
     buffer_read: BytesMut,
     codec: EventCodec,
@@ -300,7 +293,7 @@ pub struct UInputSink {
 impl UInputSink {
     pub fn evdev(&self) -> Option<EvdevHandle> {
         self.fd.as_ref().map(|(fd, _)|
-            EvdevHandle::new(FdRef(fd))
+            EvdevHandle::new(Fd(fd))
         )
     }
 

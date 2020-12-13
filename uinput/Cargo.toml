@@ -4,6 +4,7 @@ version = "0.0.1"
 edition = "2018"
 
 [dependencies]
+screenstub-fd = { version = "^0.0.1", path = "../fd" }
 input-linux = { version = "^0.4.0", features = ["with-tokio"] }
 futures = { version = "^0.3.4", features = ["bilock", "unstable"] }
 tokio = { version = "^0.3.3", default-features = false, features = ["macros", "time", "io-util", "rt"] }

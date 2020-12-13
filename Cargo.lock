@@ -1061,6 +1061,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "screenstub-fd"
+version = "0.0.1"
+
+[[package]]
 name = "screenstub-qemu"
 version = "0.0.1"
 dependencies = [
@@ -1080,6 +1084,7 @@ dependencies = [
  "input-linux",
  "libc",
  "log",
+ "screenstub-fd",
  "tokio",
  "tokio-util",
 ]
@@ -1092,6 +1097,7 @@ dependencies = [
  "futures",
  "input-linux",
  "log",
+ "screenstub-fd",
  "tokio",
  "xcb",
 ]
