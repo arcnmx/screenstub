@@ -135,13 +135,18 @@ impl Qemu {
             let wait = async move {
                 while let Some(e) = events.next().await {
                     match e? {
-                        qapi::qmp::Event::DEVICE_DELETED { ref data, .. } if data.device.as_ref() == Some(&id) => return Ok(()),
+                        qapi::qmp::Event::DEVICE_DELETED { ref data, .. } if data.device.as_ref() == Some(&id) => {
+                            // work around qemu bug. without this delay, device_add will work but the new device might be immediately deleted
+                            delay_for(Duration::from_millis(128)).await;
+
+                            return Ok(())
+                        },
                         _ => (),
                     }
                 }
                 Err(format_err!("Expected DEVICE_DELETED event"))
             };
-            future::try_join(delete, wait).await?;
+            future::try_join(wait, delete).await?;
         }
 
         tokio::time::delay_until(deadline).await;
