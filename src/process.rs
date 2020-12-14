@@ -5,7 +5,7 @@ use std::pin::Pin;
 //use futures::{future, Stream, Future, IntoFuture};
 use futures::{future, FutureExt, SinkExt, TryFutureExt};
 use futures::channel::mpsc as un_mpsc;
-use futures::lock::Mutex;
+use std::sync::Mutex;
 use failure::{Error, format_err};
 use config::{ConfigEvent, ConfigGrab, ConfigGrabMode, ConfigInputEvent, ConfigQemuRouting, ConfigQemuDriver};
 use qapi::qga::{guest_shutdown, GuestShutdownMode};
@@ -153,7 +153,7 @@ impl Process {
 
         match *grab {
             ConfigGrab::XCore => {
-                self.grabs.try_lock().unwrap().insert(mode, GrabHandle {
+                self.grabs.lock().unwrap().insert(mode, GrabHandle {
                     grab: None,
                     x_filter: Default::default(),
                     is_mouse: false,
@@ -220,7 +220,7 @@ impl Process {
 
                     x_filter.set_filter(xcore_ignore.iter().cloned());
 
-                    grabs.try_lock().unwrap().insert(mode, GrabHandle {
+                    grabs.lock().unwrap().insert(mode, GrabHandle {
                         grab: Some(grab),
                         x_filter: xcore_ignore,
                         is_mouse,
@@ -238,17 +238,17 @@ impl Process {
 
     pub fn is_mouse(&self) -> bool {
         // TODO: no grabs doesn't necessarily mean absolute mode...
-        self.grabs.try_lock().unwrap().iter().any(|(_, g)| g.is_mouse)
+        self.grabs.lock().unwrap().iter().any(|(_, g)| g.is_mouse)
     }
 
     fn ungrab(&self, grab: ConfigGrabMode) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
         match grab {
             ConfigGrabMode::XCore => {
-                self.grabs.try_lock().unwrap().remove(&grab);
+                self.grabs.lock().unwrap().remove(&grab);
                 self.xreq(XRequest::Ungrab)
             },
             ConfigGrabMode::Evdev => {
-                let grab = self.grabs.try_lock().unwrap().remove(&grab);
+                let grab = self.grabs.lock().unwrap().remove(&grab);
                 if let Some(mut grab) = grab {
                     self.x_input_filter.unset_filter(grab.x_filter.drain(..));
                     if grab.is_mouse && !self.is_mouse() {
@@ -317,7 +317,7 @@ impl Process {
             },
             ConfigEvent::ToggleGrab(ref grab) => {
                 let mode = grab.mode();
-                if self.grabs.try_lock().unwrap().contains_key(&mode) {
+                if self.grabs.lock().unwrap().contains_key(&mode) {
                     self.ungrab(mode)
                 } else {
                     self.grab(grab)
