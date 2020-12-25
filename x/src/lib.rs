@@ -561,7 +561,7 @@ impl XContext {
                     .map(|(dim, new, axis)| AbsoluteEvent::new(
                         time,
                         axis,
-                        new as i32 * 0x8000 / dim as i32,
+                        0x7fff.min(new as i32 * 0x8000 / dim as i32),
                     )).map(|e| XEvent::Input(e.into())));
             },
             XInputEventData::Button { pressed, button, state: _ } => {
