@@ -519,7 +519,12 @@ impl XContext {
             xcb::BUTTON_INDEX_3 => Some(Key::ButtonRight),
             xcb::BUTTON_INDEX_4 => Some(Key::ButtonGearUp),
             xcb::BUTTON_INDEX_5 => Some(Key::ButtonWheel), // Key::ButtonGearDown
-            // also map Key::ButtonSide, Key::ButtonExtra? qemu input-linux doesn't support fwd/back, but virtio probably does
+            // TODO: 6/7 is horizontal scroll left/right, but I think this requires sending relative wheel events?
+            8 => Some(Key::ButtonSide),
+            9 => Some(Key::ButtonExtra),
+            // qemu input-linux.c doesn't support fwd/back, but virtio probably does
+            10 => Some(Key::ButtonForward),
+            11 => Some(Key::ButtonBack),
             _ => None,
         }
     }
