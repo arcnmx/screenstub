@@ -213,12 +213,18 @@ pub struct RouteUInputInputLinux {
 impl UInputCommands for RouteUInputInputLinux {
     fn command_create(&self, qemu: &Arc<Qemu>, path: &Path) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
         let path = path.display();
-        let command = qmp::object_add::new(&self.id, "input-linux", vec![
+        let command = qmp::object_add::new("input-linux", &self.id, vec![
             ("evdev".into(), Any::String(path.to_string())),
             ("repeat".into(), Any::Bool(self.repeat)),
         ]);
+        let delete_command = qmp::object_del {
+            id: self.id.clone(),
+        };
         let qemu = qemu.clone();
         async move {
+            if qemu.execute_qmp(delete_command).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(512)).await;
+            }
             qemu.execute_qmp(command).map_ok(drop).await
         }.boxed()
     }
