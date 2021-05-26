@@ -22,6 +22,11 @@ screens:
     - guest_exec: ["C:/ddcset.exe", "setvcp", "60", "{:x}"] # or "0x{:x}" for hex input value
     #- guest_exec: ["C:/ScreenBright.exe", "-set", "0x60", "{}"] # "{}" is for decimal input value
     #- exec: ["ssh", "user@vm", "ddcutil", "setvcp", "0x60", "{}"] # system commands can also be used
+  #guest_rect: # may be needed when guest has multiple display outputs
+  #  top: 0.0
+  #  left: 0.0
+  #  right: 1.0
+  #  bottom: 1.0
 
 qemu:
   #routing: qmp # (default) does not require extra configuration or dependencies

@@ -40,6 +40,9 @@ pub struct ConfigScreen {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x_instance: Option<String>,
+
+    #[serde(default, skip_serializing_if = "ConfigRect::is_unit")]
+    pub guest_rect: ConfigRect,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -526,5 +529,42 @@ impl ConfigSourceName {
 
     pub unsafe fn from_value_unchecked(value: u8) -> Self {
         core::mem::transmute(value)
+    }
+}
+
+#[derive(Debug, Copy, Clone, Deserialize, Serialize, PartialOrd, PartialEq)]
+pub struct ConfigRect {
+    #[serde(default)]
+    pub top: f64,
+    #[serde(default)]
+    pub left: f64,
+    #[serde(default = "ConfigRect::one")]
+    pub bottom: f64,
+    #[serde(default = "ConfigRect::one")]
+    pub right: f64,
+}
+
+impl ConfigRect {
+    pub const fn unit() -> Self {
+        Self {
+            top: 0.0f64,
+            left: 0.0f64,
+            bottom: 1.0f64,
+            right: 1.0f64,
+        }
+    }
+
+    pub fn is_unit(&self) -> bool {
+        *self == Self::unit()
+    }
+
+    fn one() -> f64 {
+        1.0f64
+    }
+}
+
+impl Default for ConfigRect {
+    fn default() -> Self {
+        Self::unit()
     }
 }

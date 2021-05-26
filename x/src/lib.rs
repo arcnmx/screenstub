@@ -28,6 +28,29 @@ struct XState {
     pub height: u16,
     pub running: bool,
     pub grabbed: bool,
+    pub bounds_x: Bounds,
+    pub bounds_y: Bounds,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Bounds {
+    lower: i32,
+    upper: i32,
+    size: i32,
+}
+
+impl Bounds {
+    pub fn new(l: f64, u: f64) -> Self {
+        let scale = 0x7fff as f64;
+        let lower = (l * scale) as i32;
+        let upper = (u * scale) as i32;
+
+        Self {
+            lower,
+            upper,
+            size: upper - lower,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -310,7 +333,7 @@ impl XContext {
         self.state.running = false;
     }
 
-    pub async fn xmain<I: Stream<Item=XRequest>, O: Sink<XEvent>>(name: &str, instance: &str, class: &str, i: I, o: O) -> Result<(), Error> {
+    pub async fn xmain<I: Stream<Item=XRequest>, O: Sink<XEvent>>(name: &str, instance: &str, class: &str, rect: (Bounds, Bounds), i: I, o: O) -> Result<(), Error> {
         let (conn, sink, display) = Self::connect().await?;
         let setup = conn.setup().clone();
         let mut conn = conn.fuse();
@@ -330,6 +353,9 @@ impl XContext {
         let i = i.fuse();
         futures::pin_mut!(i);
         futures::pin_mut!(o);
+
+        xcontext.state.bounds_x = rect.0;
+        xcontext.state.bounds_y = rect.1;
 
         xcontext.state.running = true;
         xcontext.set_wm_name(name).await?;
@@ -768,15 +794,15 @@ impl XContext {
         match e.data {
             XInputEventData::Mouse { x, y } => {
                 self.event_queue.extend([
-                    (self.state.width, x, AbsoluteAxis::X),
-                    (self.state.height, y, AbsoluteAxis::Y),
+                    (self.state.width, x, AbsoluteAxis::X, self.state.bounds_x),
+                    (self.state.height, y, AbsoluteAxis::Y, self.state.bounds_y),
                 ].iter()
-                    .filter(|&&(dim, new, _)| dim != 0)
-                    .map(|&(dim, new, axis)| (dim, (new.max(0) as u16).min(dim), axis))
-                    .map(|(dim, new, axis)| AbsoluteEvent::new(
+                    .filter(|&&(dim, new, _, _)| dim != 0)
+                    .map(|&(dim, new, axis, bounds)| (dim, (new.max(0) as u16).min(dim), axis, bounds))
+                    .map(|(dim, new, axis, bounds)| AbsoluteEvent::new(
                         time,
                         axis,
-                        0x7fff.min(new as i32 * 0x8000 / dim as i32),
+                        bounds.upper.min(bounds.lower + new as i32 * bounds.size / dim as i32),
                     )).map(|e| XEvent::Input(e.into())));
             },
             XInputEventData::MouseRelative { axis, value } => {
