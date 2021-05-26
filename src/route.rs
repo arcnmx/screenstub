@@ -186,6 +186,7 @@ impl UInputCommands for RouteUInputVirtio {
         };
         let command = qmp::device_add::new(name, Some(self.id.clone()), self.bus.clone(), vec![
             ("evdev".into(), Any::String(path.display().to_string())),
+            ("multifunction".into(), Any::Bool(true)),
         ]);
         let deadline = Instant::now() + Duration::from_millis(512); // HACK: wait for udev to see device and change permissions
         let qemu = qemu.clone();
