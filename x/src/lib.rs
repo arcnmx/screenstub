@@ -88,7 +88,7 @@ pub struct XContext {
     window: xcore::Window,
     ext_input: xcore::QueryExtensionReply,
     ext_test: xcore::QueryExtensionReply,
-    ext_dpms: xcore::QueryExtensionReply,
+    ext_dpms: Option<xcore::QueryExtensionReply>,
     ext_xkb: xcore::QueryExtensionReply,
     setup: xcore::Setup,
 
@@ -128,8 +128,7 @@ impl XContext {
             .expect("XKB required");
         let ext_test = sink.extension(ExtensionKind::Test).await.await?
             .expect("XTest required");
-        let ext_dpms = sink.extension(ExtensionKind::DPMS).await.await?
-            .expect("DPMS required");
+        let ext_dpms = sink.extension(ExtensionKind::DPMS).await.await?;
         let _ = sink.execute(xinput::XIQueryVersionRequest {
             major_opcode: ext_input.major_opcode,
             major_version: 2,
@@ -506,12 +505,14 @@ impl XContext {
 
         Ok(match event {
             ExtensionEvent::Core(xcore::Events::VisibilityNotify(event)) => {
-                let dpms_blank = {
+                let dpms_blank = if let Some(ext_dpms) = &self.ext_dpms {
                     let info = self.sink.execute(dpms::InfoRequest {
-                        major_opcode: self.ext_dpms.major_opcode,
+                        major_opcode: ext_dpms.major_opcode,
                     }).await.await?;
 
                     info.power_level.get() != dpms::DPMSMode::On
+                } else {
+                    false
                 };
                 self.event_queue.push(if dpms_blank {
                     XEvent::Visible(false)
