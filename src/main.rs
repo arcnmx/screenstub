@@ -120,11 +120,16 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
 
     match matches.subcommand() {
         Some(("x", ..)) => {
+            let rect = (
+                x::Bounds::new(screen.guest_rect.left, screen.guest_rect.right),
+                x::Bounds::new(screen.guest_rect.top, screen.guest_rect.bottom),
+            );
+
             let (x_sender, mut x_receiver) = mpsc::channel(0x20);
             let (mut xreq_sender, xreq_receiver) = mpsc::channel(0x08);
             let xinstance = screen.x_instance.unwrap_or("auto".into());
             let xmain = tokio::spawn(async move {
-                let x = x::XContext::xmain("screenstub", &xinstance, "screenstub", xreq_receiver, x_sender);
+                let x = x::XContext::xmain("screenstub", &xinstance, "screenstub", rect, xreq_receiver, x_sender);
                 if let Err(e) = x.await {
                     error!("X Error: {}: {:?}", e, e);
                 }
