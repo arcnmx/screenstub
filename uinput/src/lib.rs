@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use std::{mem, slice};
 use std::task::{Poll, Context};
 use std::pin::Pin;
-use screenstub_fd::{Fd, FdRef};
+use screenstub_fd::FdRef;
 use input_linux as input;
 use input_linux::{
     UInputHandle, InputId,
@@ -21,7 +21,7 @@ use futures::{Sink, Stream, ready};
 use bytes::{BytesMut, BufMut};
 use log::{trace, debug};
 
-pub type EvdevHandle<'a> = input_linux::EvdevHandle<FdRef<'a, AsyncFd<Fd>>>;
+pub type EvdevHandle<'a> = input_linux::EvdevHandle<FdRef<'a, AsyncFd<File>>>;
 
 #[derive(Debug, Default, Clone)]
 pub struct Builder {
@@ -155,9 +155,9 @@ impl Builder {
         open.read(true);
         open.write(true);
         let file = open.open(FILENAME)?;
-        let fd = AsyncFd::new(file.as_raw_fd().into())?;
+        let fd = AsyncFd::new(file)?;
 
-        let handle = UInputHandle::new(Fd(&file));
+        let handle = UInputHandle::new(FdRef::from(&fd));
 
         debug!("UInput props {:?}", self.bits_props);
         for bit in &self.bits_props {
@@ -209,15 +209,13 @@ impl Builder {
         Ok(UInput {
             path: handle.evdev_path()?,
             fd,
-            file,
         })
     }
 }
 
 #[derive(Debug)]
 pub struct UInput {
-    pub fd: AsyncFd<Fd>,
-    pub file: File,
+    pub fd: AsyncFd<File>,
     pub path: PathBuf,
 }
 
@@ -227,7 +225,7 @@ impl UInput {
     }
 
     pub fn write_events(&mut self, events: &[InputEvent]) -> io::Result<usize> {
-        UInputHandle::new(Fd(&self.fd)).write(unsafe { mem::transmute(events) })
+        UInputHandle::new(FdRef::from(&self.fd)).write(unsafe { mem::transmute(events) })
     }
 
     pub fn write_event(&mut self, event: &InputEvent) -> io::Result<usize> {
@@ -238,7 +236,7 @@ impl UInput {
         //let uinput_write = FramedWrite::new(uinput_f, input::EventCodec::new());
 
         Ok(UInputSink {
-            fd: Some((self.fd, self.file)),
+            fd: Some(self.fd),
             buffer_write: BytesMut::with_capacity(mem::size_of::<InputEvent>() * 32),
             buffer_read: Default::default(),
             codec: EventCodec::new(),
@@ -248,8 +246,7 @@ impl UInput {
 
 #[derive(Debug)]
 pub struct Evdev {
-    fd: AsyncFd<Fd>,
-    file: File,
+    fd: AsyncFd<File>,
 }
 
 impl Evdev {
@@ -261,20 +258,19 @@ impl Evdev {
         let file = open.open(path)?;
 
         Ok(Evdev {
-            fd: AsyncFd::new(file.as_raw_fd().into())?,
-            file,
+            fd: AsyncFd::new(file)?,
         })
     }
 
     pub fn evdev(&self) -> EvdevHandle {
-        EvdevHandle::new(Fd(&self.fd))
+        EvdevHandle::new(FdRef::from(&self.fd))
     }
 
     pub fn to_sink(self) -> io::Result<UInputSink> {
         //let uinput_write = FramedWrite::new(uinput_f, input::EventCodec::new());
 
         Ok(UInputSink {
-            fd: Some((self.fd, self.file)),
+            fd: Some(self.fd),
             buffer_write: Default::default(),
             buffer_read: BytesMut::with_capacity(mem::size_of::<InputEvent>() * 32),
             codec: EventCodec::new(),
@@ -284,7 +280,7 @@ impl Evdev {
 
 //#[derive(Debug)]
 pub struct UInputSink {
-    fd: Option<(AsyncFd<Fd>, File)>,
+    fd: Option<AsyncFd<File>>,
     buffer_write: BytesMut,
     buffer_read: BytesMut,
     codec: EventCodec,
@@ -292,8 +288,8 @@ pub struct UInputSink {
 
 impl UInputSink {
     pub fn evdev(&self) -> Option<EvdevHandle> {
-        self.fd.as_ref().map(|(fd, _)|
-            EvdevHandle::new(Fd(fd))
+        self.fd.as_ref().map(|fd|
+            EvdevHandle::new(FdRef::from(fd))
         )
     }
 
@@ -336,11 +332,11 @@ impl Sink<InputEvent> for UInputSink {
         trace!("UInputSink start_send({:?})", item);
 
         let this = unsafe { self.get_unchecked_mut() };
-        if let Some((_, file)) = this.fd.as_mut() {
+        if let Some(fd) = this.fd.as_mut() {
             this.codec.encode(item, &mut this.buffer_write)?;
 
             // attempt a single non-blocking write
-            match io_poll(Self::write_events(file, &mut this.buffer_write)) {
+            match io_poll(Self::write_events(fd.get_mut(), &mut this.buffer_write)) {
                 Poll::Ready(Err(e)) => return Err(e),
                 _ => (),
             }
@@ -372,11 +368,11 @@ impl Sink<InputEvent> for UInputSink {
         trace!("UInputSink poll_flush");
 
         let this = unsafe { self.get_unchecked_mut() };
-        if let Some((fd, file)) = this.fd.as_mut() {
+        if let Some(fd) = this.fd.as_mut() {
             while !this.buffer_write.is_empty() {
-                let mut ready = ready!(fd.poll_write_ready(cx))?;
+                let mut ready = ready!(fd.poll_write_ready_mut(cx))?;
                 let buffer = &mut this.buffer_write;
-                match ready.try_io(|_| Self::write_events(file, buffer)) {
+                match ready.try_io(|fd| Self::write_events(fd.get_mut(), buffer)) {
                     Err(_) => continue,
                     Ok(n) => {
                         n?;
@@ -414,14 +410,14 @@ impl Stream for UInputSink {
 
         let this = unsafe { self.get_unchecked_mut() };
         loop {
-            if let Some((fd, file)) = this.fd.as_mut() {
+            if let Some(fd) = this.fd.as_mut() {
                 if let Some(frame) = this.codec.decode(&mut this.buffer_read)? {
                     return Poll::Ready(Some(Ok(frame)))
                 }
 
-                let mut ready = ready!(fd.poll_read_ready(cx))?;
+                let mut ready = ready!(fd.poll_read_ready_mut(cx))?;
                 let buffer = &mut this.buffer_read;
-                let n = match ready.try_io(|_| Self::read_events(file, buffer)) {
+                let n = match ready.try_io(|fd| Self::read_events(fd.get_mut(), buffer)) {
                     Err(_) => continue,
                     Ok(n) => n?,
                 };
