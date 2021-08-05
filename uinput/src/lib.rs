@@ -317,7 +317,7 @@ impl UInputSink {
         buffer_read.reserve(mem::size_of::<InputEvent>());
         unsafe {
             let n = {
-                let buffer = buffer_read.bytes_mut();
+                let buffer = buffer_read.chunk_mut();
                 debug_assert_eq!(buffer.len() % mem::size_of::<InputEvent>(), 0);
                 let buffer = slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len());
                 file.read(buffer)
@@ -376,11 +376,9 @@ impl Sink<InputEvent> for UInputSink {
             while !this.buffer_write.is_empty() {
                 let mut ready = ready!(fd.poll_write_ready(cx))?;
                 let buffer = &mut this.buffer_write;
-                match ready.with_poll(|| io_poll(
-                    Self::write_events(file, buffer)
-                )) {
-                    Poll::Pending => continue,
-                    Poll::Ready(n) => {
+                match ready.try_io(|_| Self::write_events(file, buffer)) {
+                    Err(_) => continue,
+                    Ok(n) => {
                         n?;
                     },
                 }
@@ -423,11 +421,9 @@ impl Stream for UInputSink {
 
                 let mut ready = ready!(fd.poll_read_ready(cx))?;
                 let buffer = &mut this.buffer_read;
-                let n = match ready.with_poll(|| io_poll(
-                    Self::read_events(file, buffer)
-                )) {
-                    Poll::Pending => continue,
-                    Poll::Ready(n) => n?,
+                let n = match ready.try_io(|_| Self::read_events(file, buffer)) {
+                    Err(_) => continue,
+                    Ok(n) => n?,
                 };
                 if n == 0 {
                     this.fd = None;

@@ -5,10 +5,10 @@ edition = "2018"
 
 [dependencies]
 screenstub-fd = { version = "^0.0.1", path = "../fd" }
-input-linux = { version = "^0.4.0", features = ["with-tokio"] }
+input-linux = { version = "^0.5.0", features = ["with-tokio"] }
 futures = { version = "^0.3.4", features = ["bilock", "unstable"] }
-tokio = { version = "^0.3.3", default-features = false, features = ["macros", "time", "io-util", "rt"] }
-tokio-util = { version = "^0.5.0", default-features = false, features = [ "codec" ] }
-bytes = "^0.6.0"
+tokio = { version = "^1.0.0", default-features = false, features = ["macros", "time", "io-util", "rt"] }
+tokio-util = { version = "^0.6.0", default-features = false, features = [ "codec" ] }
+bytes = "^1.0.0"
 log = "^0.4.1"
 libc = "^0.2.36"
