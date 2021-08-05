@@ -1,7 +1,7 @@
 use std::fmt;
 use ddc_hi::{Display, Query, Ddc};
 use crate::{SearchDisplay, DdcMonitor, FEATURE_CODE_INPUT};
-use failure::Error;
+use anyhow::Error;
 
 pub struct Monitor {
     display: Display,

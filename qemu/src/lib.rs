@@ -1,7 +1,7 @@
 use std::io;
 use std::sync::{Mutex, Arc, Weak};
 use std::future::Future;
-use failure::{Error, format_err};
+use anyhow::{Error, format_err};
 use futures::{TryFutureExt, StreamExt};
 use futures::future;
 use tokio::net::UnixStream;

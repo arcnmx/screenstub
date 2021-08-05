@@ -1,5 +1,5 @@
 use std::fmt;
-use failure::{Error, format_err};
+use anyhow::{Error, format_err};
 
 #[cfg(feature = "ddcutil")]
 pub mod ddcutil;
@@ -9,13 +9,23 @@ pub mod ddc;
 
 pub const FEATURE_CODE_INPUT: u8 = 0x60;
 
-#[derive(failure_derive::Fail, Debug)]
+#[derive(Debug)]
 pub enum DdcError {
-    #[fail(display = "Display not found")]
     DisplayNotFound,
-    #[fail(display = "Feature code not found")]
     FeatureCodeNotFound,
 }
+
+impl fmt::Display for DdcError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let msg = match self {
+            DdcError::DisplayNotFound => "Display not found",
+            DdcError::FeatureCodeNotFound => "Feature code not found",
+        };
+        f.write_str(msg)
+    }
+}
+
+impl std::error::Error for DdcError { }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SearchDisplay {

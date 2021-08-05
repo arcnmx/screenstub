@@ -2,7 +2,7 @@ use std::time::Duration;
 use std::future::Future;
 use std::hint;
 use futures::{future, TryFutureExt};
-use failure::Error;
+use anyhow::Error;
 use tokio::time;
 
 pub fn retry<R, E: Into<Error>, F: Future<Output=Result<R, E>>, FF: FnMut() -> F>(mut f: FF, retries: usize, timeout: Duration) -> impl Future<Output=Result<R, Error>> {

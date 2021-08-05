@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::io::{self, Write};
 use futures::channel::{mpsc, oneshot};
 use futures::{future, TryFutureExt, FutureExt, StreamExt, SinkExt};
-use failure::{Error, format_err};
+use anyhow::{Error, format_err};
 use log::{warn, error};
 use clap::{Arg, App, SubCommand, AppSettings};
 use input::{InputId, Key, RelativeAxis, AbsoluteAxis, InputEvent, EventKind};

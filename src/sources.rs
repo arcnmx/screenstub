@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use futures::lock::Mutex;
 use tokio::time::{Duration, Instant, sleep_until};
-use failure::{Error, format_err};
+use anyhow::{Error, format_err};
 use qemu::Qemu;
 use config::{ConfigSource, ConfigMonitor, ConfigDdcMethod};
 use crate::exec::exec;

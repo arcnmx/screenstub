@@ -1,7 +1,7 @@
 pub extern crate xcb;
 
 use futures::{Sink, Stream, ready};
-use failure::{Error, format_err};
+use anyhow::{Error, format_err};
 use input_linux::{InputEvent, EventTime, KeyEvent, KeyState, Key, AbsoluteEvent, AbsoluteAxis, SynchronizeEvent};
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;

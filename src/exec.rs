@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::future::Future;
 use std::process::{Stdio, ExitStatus};
 use tokio::process::Command;
-use failure::{Error, format_err};
+use anyhow::{Error, format_err};
 
 pub struct Builder {
     child: Option<Command>,

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::io;
 use futures::channel::mpsc as un_mpsc;
 use futures::{Sink, SinkExt, StreamExt, FutureExt, stream, future};
-use failure::Error;
+use anyhow::Error;
 use input::{InputEvent, InputId};
 use uinput::{UInputSink, EvdevHandle, Evdev};
 use config::ConfigInputEvent;

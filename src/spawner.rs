@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use tokio::time::{Duration, Instant, timeout_at};
 use tokio::task::JoinHandle;
 use futures::{Future, future};
-use failure::Error;
+use anyhow::Error;
 
 pub struct Spawner {
     handles: Mutex<Vec<JoinHandle<()>>>,

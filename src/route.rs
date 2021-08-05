@@ -8,7 +8,7 @@ use tokio::time::{Duration, Instant};
 use input::{InputEvent, EventRef, KeyEvent, Key, RelativeAxis, AbsoluteAxis};
 use futures::channel::mpsc;
 use futures::{StreamExt, SinkExt, Future, FutureExt, TryFutureExt};
-use failure::{Error, format_err};
+use anyhow::{Error, Context};
 use config::ConfigQemuRouting;
 use config::keymap::Keymaps;
 use qapi::{qmp, Any};
@@ -269,7 +269,7 @@ impl<U: UInputCommands> RouteUInput<U> {
             let res = async move {
                 while let Some(e) = events.next().await {
                     uinput.send(e).await
-                        .map_err(|e| format_err!("uinput write failed: {:?}", e))?;
+                        .context("uinput write failed")?;
                 }
                 Ok(())
             }.await;

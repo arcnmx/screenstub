@@ -6,7 +6,7 @@ use std::pin::Pin;
 use futures::{future, FutureExt, SinkExt, TryFutureExt};
 use futures::channel::mpsc as un_mpsc;
 use std::sync::Mutex;
-use failure::{Error, format_err};
+use anyhow::{Error, format_err};
 use config::{ConfigEvent, ConfigGrab, ConfigGrabMode, ConfigInputEvent, ConfigQemuRouting, ConfigQemuDriver};
 use qapi::qga::{guest_shutdown, GuestShutdownMode};
 use input::{self, InputEvent, RelativeAxis, InputId};

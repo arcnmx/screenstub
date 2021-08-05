@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::mem::replace;
 use std::fmt;
-use failure::Error;
+use anyhow::Error;
 use ddcutil::{DisplayInfo, Display, FeatureInfo};
 use crate::{DdcError, DdcMonitor, SearchDisplay, FEATURE_CODE_INPUT};
 
