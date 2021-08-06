@@ -16,7 +16,7 @@ use std::io::{self, Write};
 use futures::channel::{mpsc, oneshot};
 use futures::{future, TryFutureExt, FutureExt, StreamExt, SinkExt};
 use anyhow::{Error, format_err};
-use log::{warn, error};
+use log::{warn, error, info};
 use clap::{Arg, App, SubCommand, AppSettings};
 use input::{InputId, Key, RelativeAxis, AbsoluteAxis, InputEvent, EventKind};
 use config::{Config, ConfigEvent, ConfigSourceName};
@@ -219,6 +219,29 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
                     move |event| process.process_user_event(&event)
                 });
 
+            let sigint_handler = ctrlc::set_handler({
+                let mut user_sender = user_sender.clone();
+                let mut repeat_quit = false;
+                move || {
+                    if repeat_quit {
+                        info!("Repeated quit attempt detected, quitting forcefully");
+                        exit(128 + ctrlc::Signal::SIGINT as i32);
+                    } else {
+                        match user_sender.try_send(Arc::new(ConfigEvent::Exit)) {
+                            Ok(()) => (),
+                            Err(_) =>
+                                warn!("Failed to send Quit event to main loop"),
+                        }
+                        repeat_quit = true;
+                    }
+                }
+            });
+            match sigint_handler {
+                Ok(()) => (),
+                Err(e) => warn!("Failed to set up SIGINT handler: {}", e),
+            }
+
+
             let (event_loop, event_loop_abort) = future::abortable({
                 let events = events.clone();
                 let process = process.clone();
@@ -307,6 +330,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             };
 
             let _ = xreq_sender.send(XRequest::Quit).await; // ensure we kill x
+            xreq_sender.close_channel();
             drop(xreq_sender);
             drop(process);
 
