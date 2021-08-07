@@ -525,11 +525,12 @@ impl XContext {
             Default::default()
         };
 
+        self.valuators.clear();
         for (_, device) in &self.devices {
-            self.valuators = device.classes.iter().filter_map(|class| match class.data {
+            self.valuators.extend(device.classes.iter().filter_map(|class| match class.data {
                 xinput::DeviceClassData::Valuator(val) => Some(((device.deviceid.value(), val.number), val)),
                 _ => None,
-            }).collect();
+            }));
         }
 
         Ok(())
@@ -720,12 +721,7 @@ impl XContext {
                             _ => continue,
                         };
                         let &xinput::Fp3232 { integral, frac } = value_raw;
-                        let value = (integral as i64) << 32;
-                        let value = if integral < 0 {
-                            value - frac as i64
-                        } else {
-                            value + frac as i64
-                        };
+                        let value = value_raw.fixed_point();
                         let event = XInputEvent {
                             time: event.time.value(),
                             data: match valuator.mode.get() {
@@ -738,7 +734,7 @@ impl XContext {
                                         3 => RelativeAxis::HorizontalWheel,
                                         _ => continue,
                                     },
-                                    value: (value >> 32) as i32,
+                                    value: (value / (1i64 << 30)) as i32,
                                 },
                                 xinput::ValuatorMode::Absolute => continue /*XInputEventData::Mouse {
                                     axis: match axis {
