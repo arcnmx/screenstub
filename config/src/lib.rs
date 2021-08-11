@@ -323,7 +323,37 @@ pub struct ConfigInputDevice {
     pub vendor_id: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_id: Option<u16>,
-    // pub kind (keyboard, mouse, tablet, etc)
+    #[serde(default = "true_")]
+    pub master: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
+    pub kind: Option<ConfigInputDeviceKind>,
+}
+
+impl Default for ConfigInputDevice {
+    fn default() -> Self {
+        Self {
+            id: None,
+            name: Default::default(),
+            vendor_id: None,
+            product_id: None,
+            master: true,
+            kind: None,
+        }
+    }
+}
+
+impl ConfigInputDevice {
+    pub fn is_any(&self) -> bool {
+        self.id.is_none() && self.name.is_empty() && self.vendor_id.is_none() && self.product_id.is_none() && self.kind.is_none()
+    }
+}
+
+#[derive(Debug, Copy, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigInputDeviceKind {
+    Keyboard,
+    Mouse,
+    Tablet,
 }
 
 fn true_() -> bool {

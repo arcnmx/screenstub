@@ -6,6 +6,7 @@ use xproto::protocol::*;
 use xproto::conversion::AsPrimitive;
 use std::collections::BTreeMap;
 use log::{trace, warn, info};
+use screenstub_config as config;
 
 pub fn iter_bits(mut v: u32) -> impl Iterator<Item=usize> {
     let mut index = 0;
@@ -98,7 +99,7 @@ pub enum XRequest {
         xcore: bool,
         confine: bool,
         motion: bool,
-        devices: Vec<()>,
+        devices: Vec<config::ConfigInputDevice>,
     },
     Ungrab,
 }
@@ -118,6 +119,7 @@ pub struct XContext {
     keys: xcore::GetKeyboardMappingReply,
     mods: xcore::GetModifierMappingReply,
     devices: BTreeMap<xinput::DeviceId, xinput::XIDeviceInfo>,
+    grab_devices: Vec<config::ConfigInputDevice>,
     valuators: BTreeMap<(xinput::DeviceId, u16), xinput::DeviceClassDataValuator>,
     state: XState,
     display: xserver::Display,
@@ -233,6 +235,7 @@ impl XContext {
             setup,
             state: Default::default(),
             devices: Default::default(),
+            grab_devices: Default::default(),
             valuators: Default::default(),
             event_queue: Default::default(),
             ext_input,
@@ -455,6 +458,13 @@ impl XContext {
                     }).await.await?;
                     self.handle_grab_status(status.status)?;
                 }
+                self.grab_devices = if devices.is_empty() {
+                    vec![
+                        Default::default()
+                    ]
+                } else {
+                    devices.clone()
+                };
                 if motion {
                     self.update_grab(true).await?;
                 }
@@ -471,23 +481,67 @@ impl XContext {
         })
     }
 
+    fn grab_masks<'a>(&'a self, grab: bool) -> impl Iterator<Item=xinput::EventMask> + 'a {
+        fn device_matches(dev: &xinput::XIDeviceInfo, spec: &config::ConfigInputDevice) -> bool {
+            if !spec.name.is_empty() && spec.name.as_bytes() != &dev.name[..] {
+                return false
+            }
+
+            if let Some(kind) = spec.kind {
+                let kind = match kind {
+                    config::ConfigInputDeviceKind::Keyboard => if spec.master {
+                        xinput::DeviceType::MasterKeyboard
+                    } else {
+                        xinput::DeviceType::SlaveKeyboard
+                    },
+                    config::ConfigInputDeviceKind::Mouse | config::ConfigInputDeviceKind::Tablet => if spec.master {
+                        xinput::DeviceType::MasterPointer
+                    } else {
+                        xinput::DeviceType::SlavePointer
+                    },
+                };
+
+                if kind != dev.type_.get() {
+                    return false
+                }
+            }
+
+            true
+        }
+
+        let devices = &self.devices;
+        self.grab_devices.iter().filter_map(move |spec| {
+            let deviceid = match spec.id {
+                Some(id) => Some(xproto::enums::AltEnum::with_value(id)),
+                None if spec.is_any() => Some(if spec.master {
+                    xinput::Device::AllMaster
+                } else {
+                    xinput::Device::All
+                }.into()),
+                None => devices.values().find(|dev| device_matches(dev, spec)).map(|dev| dev.deviceid),
+            };
+
+            deviceid.map(|deviceid| xinput::EventMask {
+                deviceid,
+                mask: if grab {
+                    vec![
+                        xinput::XIEventMask::RawMotion.into()
+                    ]
+                } else {
+                    vec![
+                        Default::default()
+                    ]
+                }
+            })
+        })
+    }
+
     async fn update_grab(&mut self, grab: bool) -> Result<(), Error> {
         if let Some(xinput) = &self.ext_input {
             self.sink.execute(xinput::XISelectEventsRequest {
                 major_opcode: xinput.major_opcode,
                 window: self.screen().root,
-                masks: vec![
-                    xinput::EventMask {
-                        deviceid: xinput::Device::All.into(),
-                        mask: vec![
-                            if grab {
-                                xinput::XIEventMask::RawMotion.into()
-                            } else {
-                                Default::default()
-                            }
-                        ],
-                    },
-                ],
+                masks: self.grab_masks(grab).collect(),
             }).await.await?;
         }
         self.state.grabbed = grab;
@@ -531,6 +585,10 @@ impl XContext {
                 xinput::DeviceClassData::Valuator(val) => Some(((device.deviceid.value(), val.number), val)),
                 _ => None,
             }));
+        }
+
+        if self.state.grabbed {
+            self.update_grab(true).await?;
         }
 
         Ok(())

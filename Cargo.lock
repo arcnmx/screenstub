@@ -1074,6 +1074,7 @@ dependencies = [
  "futures",
  "input-linux",
  "log",
+ "screenstub-config",
  "screenstub-fd",
  "tokio",
  "xproto",
