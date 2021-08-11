@@ -180,11 +180,7 @@ pub struct RouteUInputVirtio {
 
 impl UInputCommands for RouteUInputVirtio {
     fn command_create(&self, qemu: &Arc<Qemu>, path: &Path) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
-        let name = match self.bus.is_some() {
-            true => "virtio-input-host-device", // TODO: double-check this, what is the virtio bus for?
-            false => "virtio-input-host-pci",
-        };
-        let command = qmp::device_add::new(name, Some(self.id.clone()), self.bus.clone(), vec![
+        let command = qmp::device_add::new("virtio-input-host-pci", Some(self.id.clone()), self.bus.clone(), vec![
             ("evdev".into(), Any::String(path.display().to_string())),
             ("multifunction".into(), Any::Bool(true)),
         ]);

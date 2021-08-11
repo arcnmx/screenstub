@@ -37,9 +37,9 @@ impl Drop for GrabHandle {
 
 pub struct Process {
     routing: ConfigQemuRouting,
-    driver_keyboard: ConfigQemuDriver,
-    driver_relative: ConfigQemuDriver,
-    driver_absolute: ConfigQemuDriver,
+    driver_keyboard: Arc<ConfigQemuDriver>,
+    driver_relative: Arc<ConfigQemuDriver>,
+    driver_absolute: Arc<ConfigQemuDriver>,
     exit_events: Vec<config::ConfigEvent>,
     qemu: Arc<Qemu>,
     events: Arc<Events>,
@@ -64,9 +64,9 @@ impl Process {
     pub fn new(routing: ConfigQemuRouting, driver_keyboard: ConfigQemuDriver, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, exit_events: Vec<config::ConfigEvent>, qemu: Arc<Qemu>, events: Arc<Events>, sources: Sources, xreq_sender: un_mpsc::Sender<XRequest>, event_sender: un_mpsc::Sender<InputEvent>, error_sender: un_mpsc::Sender<Error>, spawner: Arc<Spawner>) -> Self {
         Process {
             routing,
-            driver_keyboard,
-            driver_relative,
-            driver_absolute,
+            driver_keyboard: Arc::new(driver_keyboard),
+            driver_relative: Arc::new(driver_relative),
+            driver_absolute: Arc::new(driver_absolute),
             exit_events,
             qemu,
             events,
@@ -98,23 +98,23 @@ impl Process {
         }
     }
 
-    fn add_device_cmd(device: InputDevice, driver: ConfigQemuDriver) -> Option<qapi::qmp::device_add> {
+    fn add_device_cmd(device: InputDevice, driver: &ConfigQemuDriver) -> Option<qapi::qmp::device_add> {
         let driver = match (device, driver) {
             (InputDevice::Absolute, ConfigQemuDriver::Ps2) => panic!("PS/2 tablet not possible"),
             (_, ConfigQemuDriver::Ps2) => return None,
             (InputDevice::Keyboard, ConfigQemuDriver::Usb) => "usb-kbd",
             (InputDevice::Relative, ConfigQemuDriver::Usb) => "usb-mouse",
             (InputDevice::Absolute, ConfigQemuDriver::Usb) => "usb-tablet",
-            (InputDevice::Keyboard, ConfigQemuDriver::Virtio) => "virtio-keyboard-pci",
-            (InputDevice::Relative, ConfigQemuDriver::Virtio) => "virtio-mouse-pci",
-            (InputDevice::Absolute, ConfigQemuDriver::Virtio) => "virtio-tablet-pci",
+            (InputDevice::Keyboard, ConfigQemuDriver::Virtio { .. }) => "virtio-keyboard-pci",
+            (InputDevice::Relative, ConfigQemuDriver::Virtio { .. }) => "virtio-mouse-pci",
+            (InputDevice::Absolute, ConfigQemuDriver::Virtio { .. }) => "virtio-tablet-pci",
         };
 
         let id = Self::device_id(device);
         Some(qapi::qmp::device_add::new(driver, Some(id.into()), None, Vec::new()))
     }
 
-    async fn devices_init_cmd(qemu: Arc<Qemu>, routing: ConfigQemuRouting, device: InputDevice, driver: ConfigQemuDriver) -> Result<(), Error> {
+    async fn devices_init_cmd(qemu: Arc<Qemu>, routing: ConfigQemuRouting, device: InputDevice, driver: &ConfigQemuDriver) -> Result<(), Error> {
         match routing {
             ConfigQemuRouting::VirtioHost => return Ok(()),
             _ => (),
@@ -128,24 +128,24 @@ impl Process {
     }
 
     pub async fn devices_init(&self) -> Result<(), Error> {
-        Self::devices_init_cmd(self.qemu.clone(), self.routing, InputDevice::Keyboard, self.driver_keyboard).await?;
+        Self::devices_init_cmd(self.qemu.clone(), self.routing, InputDevice::Keyboard, &self.driver_keyboard).await?;
         self.set_is_mouse(false).await?; // TODO: config option to start up in relative mode instead
 
         Ok(())
     }
 
-    async fn set_is_mouse_cmd(qemu: Arc<Qemu>, routing: ConfigQemuRouting, driver_relative: ConfigQemuDriver, driver_absolute: ConfigQemuDriver, is_mouse: bool) -> Result<(), Error> {
+    async fn set_is_mouse_cmd(qemu: Arc<Qemu>, routing: ConfigQemuRouting, driver_relative: Arc<ConfigQemuDriver>, driver_absolute: Arc<ConfigQemuDriver>, is_mouse: bool) -> Result<(), Error> {
         let (device, driver) = if is_mouse {
             (InputDevice::Relative, driver_relative)
         } else {
             (InputDevice::Absolute, driver_absolute)
         };
 
-        Self::devices_init_cmd(qemu, routing, device, driver).await
+        Self::devices_init_cmd(qemu, routing, device, &driver).await
     }
 
     pub fn set_is_mouse(&self, is_mouse: bool) -> impl Future<Output=Result<(), Error>> {
-        Self::set_is_mouse_cmd(self.qemu.clone(), self.routing, self.driver_relative, self.driver_absolute, is_mouse)
+        Self::set_is_mouse_cmd(self.qemu.clone(), self.routing, self.driver_relative.clone(), self.driver_absolute.clone(), is_mouse)
     }
 
     fn grab(&self, grab: &ConfigGrab) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>> {
@@ -156,8 +156,8 @@ impl Process {
                 let qemu = self.qemu.clone();
                 let grabs = self.grabs.clone();
                 let routing = self.routing;
-                let driver_relative = self.driver_relative;
-                let driver_absolute = self.driver_absolute;
+                let driver_relative = self.driver_relative.clone();
+                let driver_absolute = self.driver_absolute.clone();
                 let prev_is_mouse = self.is_mouse();
                 let ignore = ignore.clone();
                 let x_filter = self.x_input_filter.clone();
@@ -196,8 +196,8 @@ impl Process {
                 let event_sender = if new_device_name.is_some() { None } else { Some(self.event_sender.clone()) };
                 let routing = self.routing;
                 let uinput_id = self.uinput_id.clone();
-                let driver_relative = self.driver_relative;
-                let driver_absolute = self.driver_absolute;
+                let driver_relative = self.driver_relative.clone();
+                let driver_absolute = self.driver_absolute.clone();
                 let prev_is_mouse = self.is_mouse();
                 let spawner = self.spawner.clone();
                 let grab = GrabEvdev::new(devices, evdev_ignore.iter().cloned());

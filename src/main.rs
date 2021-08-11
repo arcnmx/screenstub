@@ -145,7 +145,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             }).map_err(From::from);
 
             let (keyboard_driver, relative_driver, absolute_driver) =
-                (config.qemu.keyboard_driver(), config.qemu.relative_driver(), config.qemu.absolute_driver());
+                (config.qemu.keyboard_driver().clone(), config.qemu.relative_driver().clone(), config.qemu.absolute_driver().clone());
 
             let mut events = event::Events::new();
             config.hotkeys.into_iter()
@@ -165,7 +165,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             let (error_sender, mut error_recv) = mpsc::channel(1);
 
             let process = Process::new(
-                config.qemu.routing, keyboard_driver, relative_driver, absolute_driver, config.exit_events,
+                config.qemu.routing, keyboard_driver.clone(), relative_driver.clone(), absolute_driver.clone(), config.exit_events,
                 qemu.clone(), events.clone(), sources, xreq_sender.clone(), event_sender.clone(), error_sender.clone(),
                 spawner.clone(),
             );
@@ -180,8 +180,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             };
 
             let repeat = false;
-            let bus = None;
-            let mut route_keyboard = Route::new(config.qemu.routing, qemu.clone(), "screenstub-route-kbd".into(), bus.clone(), repeat);
+            let mut route_keyboard = Route::new(config.qemu.routing, qemu.clone(), "screenstub-route-kbd".into(), keyboard_driver.bus().cloned(), repeat);
             if let Some(builder) = route_keyboard.builder() {
                 builder
                     .name("screenstub-kbd")
@@ -190,7 +189,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             }
             let mut events_keyboard = route_keyboard.spawn(spawner, error_sender.clone());
 
-            let mut route_relative = Route::new(config.qemu.routing, qemu.clone(), "screenstub-route-mouse".into(), bus.clone(), repeat);
+            let mut route_relative = Route::new(config.qemu.routing, qemu.clone(), "screenstub-route-mouse".into(), relative_driver.bus().cloned(), repeat);
             if let Some(builder) = route_relative.builder() {
                 builder
                     .name("screenstub-mouse")
@@ -199,7 +198,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             }
             let mut events_relative = route_relative.spawn(spawner, error_sender.clone());
 
-            let mut route_absolute = Route::new(config.qemu.routing, qemu.clone(), "screenstub-route-tablet".into(), bus, repeat);
+            let mut route_absolute = Route::new(config.qemu.routing, qemu.clone(), "screenstub-route-tablet".into(), absolute_driver.bus().cloned(), repeat);
             if let Some(builder) = route_absolute.builder() {
                 builder
                     .name("screenstub-tablet")

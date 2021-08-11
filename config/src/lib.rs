@@ -135,31 +135,88 @@ impl Default for ConfigQemu {
 }
 
 impl ConfigQemu {
-    pub fn keyboard_driver(&self) -> ConfigQemuDriver {
+    pub fn keyboard_driver(&self) -> &ConfigQemuDriver {
         self.keyboard_driver
-            .or(self.driver)
-            .unwrap_or(ConfigQemuDriver::Ps2)
+            .as_ref()
+            .or(self.driver.as_ref())
+            .unwrap_or(&ConfigQemuDriver::Ps2)
     }
 
-    pub fn relative_driver(&self) -> ConfigQemuDriver {
+    pub fn relative_driver(&self) -> &ConfigQemuDriver {
         self.relative_driver
-            .or(self.driver)
-            .unwrap_or(ConfigQemuDriver::Usb)
+            .as_ref()
+            .or(self.driver.as_ref())
+            .unwrap_or(&ConfigQemuDriver::Usb)
     }
 
-    pub fn absolute_driver(&self) -> ConfigQemuDriver {
+    pub fn absolute_driver(&self) -> &ConfigQemuDriver {
         self.absolute_driver
-            .or(self.driver)
-            .unwrap_or(ConfigQemuDriver::Usb)
+            .as_ref()
+            .or(self.driver.as_ref())
+            .unwrap_or(&ConfigQemuDriver::Usb)
     }
 }
 
-#[derive(Debug, Copy, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", remote = "ConfigQemuDriver")]
 pub enum ConfigQemuDriver {
     Ps2,
     Usb,
-    Virtio,
+    Virtio {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bus: Option<String>,
+    },
+}
+
+impl<'de> Deserialize<'de> for ConfigQemuDriver {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum ConfigQemuDriverDeserializerPlain {
+            Virtio,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ConfigQemuDriverDeserializer {
+            Enum(
+                #[serde(deserialize_with = "ConfigQemuDriver::deserialize")]
+                ConfigQemuDriver
+            ),
+            Plain(ConfigQemuDriverDeserializerPlain),
+        }
+
+        impl From<ConfigQemuDriverDeserializer> for ConfigQemuDriver {
+            fn from(v: ConfigQemuDriverDeserializer) -> Self {
+                match v {
+                    ConfigQemuDriverDeserializer::Enum(v) => v,
+                    ConfigQemuDriverDeserializer::Plain(e) => match e {
+                        ConfigQemuDriverDeserializerPlain::Virtio => ConfigQemuDriver::Virtio {
+                            bus: Default::default(),
+                        },
+                    },
+                }
+            }
+        }
+
+        ConfigQemuDriverDeserializer::deserialize(deserializer)
+            .map(From::from)
+    }
+}
+
+impl Serialize for ConfigQemuDriver {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ConfigQemuDriver::serialize(self, serializer)
+    }
+}
+
+impl ConfigQemuDriver {
+    pub fn bus(&self) -> Option<&String> {
+        match self {
+            ConfigQemuDriver::Virtio { bus } => bus.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Serialize)]
