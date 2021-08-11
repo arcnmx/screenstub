@@ -166,7 +166,7 @@ impl Process {
                     xcore: confine,
                     confine,
                     motion: mouse,
-                    devices: devices.iter().map(|_| unimplemented!()).collect(),
+                    devices: devices.iter().cloned().collect(),
                 });
                 async move {
                     grab.await?;

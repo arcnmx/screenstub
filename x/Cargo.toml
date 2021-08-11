@@ -9,6 +9,7 @@ include = [
 
 [dependencies]
 screenstub-fd = { version = "^0.0.1", path = "../fd" }
+screenstub-config = { version = "^0.0.1", path = "../config" }
 futures = { version = "^0.3.4", features = ["bilock", "unstable"] }
 tokio = { version = "^1.0.0", default-features = false, features = ["rt-multi-thread"] }
 anyhow = "^1.0.42"
