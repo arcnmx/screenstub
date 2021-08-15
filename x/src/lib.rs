@@ -1,10 +1,13 @@
 mod util;
 mod bounds;
+mod motion;
 mod context;
 mod events;
+mod xinput;
 
 pub use self::bounds::{Bounds, Rect};
 pub use self::context::xmain;
+pub use self::motion::{Motion, MotionVector};
 
 #[derive(Debug)]
 pub enum XEvent {

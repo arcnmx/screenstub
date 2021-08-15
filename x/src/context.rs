@@ -1,14 +1,13 @@
-use futures::{Sink, Stream, SinkExt, StreamExt};
+use futures::{Sink, Stream, SinkExt, StreamExt, FutureExt};
 use anyhow::{Error, format_err};
-use input_linux::RelativeAxis;
 use xproto::protocol::*;
 use xproto::conversion::AsPrimitive;
 use std::collections::BTreeMap;
 use log::{trace, warn, info};
 use screenstub_config as config;
 use crate::{Rect, XEvent, XRequest};
-use crate::events::{XEventQueue, XInputEvent, XInputEventData};
-use crate::util::*;
+use crate::events::XEventQueue;
+use crate::xinput::{XInput, XInputVersion};
 
 pub async fn xmain<I: Stream<Item=XRequest>, O: Sink<XEvent>>(name: &str, instance: &str, class: &str, rect: Rect, i: I, o: O) -> Result<(), Error> {
     let (conn, sink, display) = XContext::connect().await?;
@@ -31,13 +30,14 @@ pub async fn xmain<I: Stream<Item=XRequest>, O: Sink<XEvent>>(name: &str, instan
     futures::pin_mut!(i);
     futures::pin_mut!(o);
 
-    xcontext.event_queue.bounds = rect;
+    xcontext.event_queue.set_bounds(rect);
 
     xcontext.state.running = true;
     xcontext.set_wm_name(name).await?;
     xcontext.set_wm_class(instance, class).await?;
     xcontext.map_window().await?;
 
+    let mut idle = futures::future::Fuse::terminated();
     while xcontext.state.running {
         futures::select_biased! {
             req = i.next() => match req {
@@ -46,8 +46,13 @@ pub async fn xmain<I: Stream<Item=XRequest>, O: Sink<XEvent>>(name: &str, instan
             },
             e = event_receiver.next() => match e {
                 None => break,
-                Some(e) => xcontext.process_event(&e?).await?,
+                Some(e) => {
+                    idle = futures::future::ready(()).fuse();
+                    xcontext.process_event(&e?).await?
+                },
             },
+            () = idle =>
+                xcontext.event_queue.commit(),
         }
 
         while let Some(e) = xcontext.event_queue.pop() {
@@ -67,23 +72,22 @@ struct XState {
     pub grabbed: bool,
 }
 
-type XConnection = xserver::stream::XConnection<xserver::stream::IoRead<'static>>;
-type XSink = xserver::stream::XSink<xserver::stream::IoWrite<'static>>;
+pub type XConnection = xserver::stream::XConnection<xserver::stream::IoRead<'static>>;
+pub type XSink = xserver::stream::XSink<xserver::stream::IoWrite<'static>>;
 
 pub struct XContext {
     sink: XSink,
     window: xcore::Window,
-    ext_input: Option<xcore::QueryExtensionReply>,
+    ext_input: Option<(xcore::QueryExtensionReply, XInputVersion)>,
     ext_test: Option<xcore::QueryExtensionReply>,
     ext_dpms: Option<xcore::QueryExtensionReply>,
     ext_xkb: Option<xcore::QueryExtensionReply>,
     setup: xcore::Setup,
 
-    keys: xcore::GetKeyboardMappingReply,
-    mods: xcore::GetModifierMappingReply,
     devices: BTreeMap<xinput::DeviceId, xinput::XIDeviceInfo>,
     grab_devices: Vec<config::ConfigInputDevice>,
-    valuators: BTreeMap<(xinput::DeviceId, u16), xinput::DeviceClassDataValuator>,
+    grab_raw: bool,
+    xinput: XInput,
     state: XState,
     display: xserver::Display,
 
@@ -114,13 +118,10 @@ impl XContext {
         let ext_xkb = sink.extension(ExtensionKind::Xkb).await.await?;
         let ext_test = sink.extension(ExtensionKind::Test).await.await?;
         let ext_dpms = sink.extension(ExtensionKind::DPMS).await.await?;
-        if let Some(xinput) = &ext_input {
-            let _ = sink.execute(xinput::XIQueryVersionRequest {
-                major_opcode: xinput.major_opcode,
-                major_version: 2,
-                minor_version: 3,
-            }).await.await?;
-        }
+        let ext_input = if let Some(xinput) = ext_input {
+            XInputVersion::query(&mut sink, &xinput).await?
+                .map(|v| (xinput, v))
+        } else { None };
 
         if let Some(xkb) = &ext_xkb {
             let _ = sink.execute(xkb::UseExtensionRequest {
@@ -129,6 +130,14 @@ impl XContext {
                 wanted_minor: 0,
             }).await.await?;
         }
+
+        let core_input_mask = if ext_input.is_some() {
+            Default::default()
+        } else {
+            xcore::EventMask::KeyPress | xcore::EventMask::KeyRelease
+                | xcore::EventMask::ButtonPress | xcore::EventMask::ButtonRelease
+                | xcore::EventMask::PointerMotion | xcore::EventMask::ButtonMotion
+        };
 
         sink.execute(xcore::CreateWindowRequest {
             depth: xcore::WindowClass::CopyFromParent.into(),
@@ -144,8 +153,8 @@ impl XContext {
                     background_pixel: screen.black_pixel,
                 }),
                 event_mask: Some(xcore::CreateWindowRequestValueListEventMask {
-                    event_mask: (xcore::EventMask::VisibilityChange
-                        | xcore::EventMask::KeyPress | xcore::EventMask::KeyRelease | xcore::EventMask::ButtonPress | xcore::EventMask::ButtonRelease | xcore::EventMask::PointerMotion | xcore::EventMask::ButtonMotion
+                    event_mask: (core_input_mask
+                        | xcore::EventMask::VisibilityChange
                         | xcore::EventMask::PropertyChange
                         | xcore::EventMask::StructureNotify
                         | xcore::EventMask::FocusChange).into(),
@@ -154,17 +163,26 @@ impl XContext {
             },
         }).await.await?;
 
-        if let Some(xinput) = &ext_input {
-            sink.execute(xinput::XISelectEventsRequest {
-                major_opcode: xinput.major_opcode,
-                window,
-                masks: vec![
-                    xinput::EventMask {
-                        deviceid: xinput::Device::All.into(),
-                        mask: vec![xinput::XIEventMask::DeviceChanged.into()],
-                    },
-                ],
-            }).await.await?;
+        let grab_raw = false;
+        if let Some((xinput, version)) = &ext_input {
+            if version >= &XInputVersion::_2_0 {
+                sink.execute(xinput::XISelectEventsRequest {
+                    major_opcode: xinput.major_opcode,
+                    window,
+                    masks: vec![
+                        xinput::EventMask {
+                            deviceid: xinput::Device::All.into(),
+                            mask: vec![xinput::XIEventMask::DeviceChanged.into()],
+                        },
+                        xinput::EventMask {
+                            deviceid: xinput::Device::AllMaster.into(),
+                            mask: version.events_mask(grab_raw),
+                        },
+                    ],
+                }).await.await?;
+            } else {
+                unimplemented!("XInput 1.x")
+            }
         }
 
         if let Some(xkb) = &ext_xkb {
@@ -193,13 +211,12 @@ impl XContext {
             atom_net_wm_state: sink.intern_atom("_NET_WM_STATE").await.await?,
             atom_net_wm_state_fullscreen: sink.intern_atom("_NET_WM_STATE_FULLSCREEN").await.await?,
 
-            keys,
-            mods,
+            xinput: XInput::new(setup.min_keycode, keys, mods),
             setup,
             state: Default::default(),
             devices: Default::default(),
             grab_devices: Default::default(),
-            valuators: Default::default(),
+            grab_raw,
             event_queue: Default::default(),
             ext_input,
             ext_test,
@@ -284,18 +301,6 @@ impl XContext {
         ).request_check()?;*/
 
         Ok(())
-    }
-
-    pub fn keycode(&self, code: u8) -> u8 {
-        code - self.setup.min_keycode
-    }
-
-    pub fn keysym(&self, code: u8) -> Option<u32> {
-        let modifier = 0; // TODO: ?
-        match self.keys.keysyms.get(code as usize * self.keys.keysyms_per_keycode as usize + modifier).cloned() {
-            Some(0) => None,
-            keysym => keysym,
-        }
     }
 
     pub fn stop(&mut self) {
@@ -448,12 +453,16 @@ impl XContext {
     }
 
     async fn update_grab(&mut self, grab: bool) -> Result<(), Error> {
-        if let Some(xinput) = &self.ext_input {
-            self.sink.execute(xinput::XISelectEventsRequest {
-                major_opcode: xinput.major_opcode,
-                window: self.screen().root,
-                masks: self.grab_masks(grab).collect(),
-            }).await.await?;
+        if let Some((xinput, version)) = &self.ext_input {
+            if version >= &XInputVersion::_2_0 {
+                self.sink.execute(xinput::XISelectEventsRequest {
+                    major_opcode: xinput.major_opcode,
+                    window: self.screen().root,
+                    masks: self.grab_masks(grab).collect(),
+                }).await.await?;
+            } else {
+                unimplemented!("XInput 1.x")
+            }
         }
         self.state.grabbed = grab;
 
@@ -464,7 +473,7 @@ impl XContext {
 
     async fn update_key_mappings(&mut self) -> Result<(), Error> {
         let setup = &self.setup;
-        self.keys = self.sink.execute(xcore::GetKeyboardMappingRequest {
+        self.xinput.keys = self.sink.execute(xcore::GetKeyboardMappingRequest {
             first_keycode: setup.min_keycode,
             count: setup.max_keycode - setup.min_keycode,
         }).await.await?;
@@ -474,25 +483,29 @@ impl XContext {
 
     async fn update_mappings(&mut self) -> Result<(), Error> {
         self.update_key_mappings().await?;
-        self.mods = self.sink.execute(xcore::GetModifierMappingRequest { }).await.await?;
+        self.xinput.mods = self.sink.execute(xcore::GetModifierMappingRequest { }).await.await?;
 
         Ok(())
     }
 
     async fn update_valuators(&mut self) -> Result<(), Error> {
-        self.devices = if let Some(xinput) = &self.ext_input {
-            self.sink.execute(xinput::XIQueryDeviceRequest {
-                major_opcode: xinput.major_opcode,
-                deviceid: xinput::Device::All.into(),
-            }).await.await?.infos
-                .into_iter().map(|info| (info.deviceid.value(), info)).collect()
+        self.devices = if let Some((xinput, version)) = &self.ext_input {
+            if version >= &XInputVersion::_2_0 {
+                self.sink.execute(xinput::XIQueryDeviceRequest {
+                    major_opcode: xinput.major_opcode,
+                    deviceid: xinput::Device::All.into(),
+                }).await.await?.infos
+                    .into_iter().map(|info| (info.deviceid.value(), info)).collect()
+            } else {
+                unimplemented!("XInput 1.x")
+            }
         } else {
             Default::default()
         };
 
-        self.valuators.clear();
+        self.xinput.valuators.clear();
         for (_, device) in &self.devices {
-            self.valuators.extend(device.classes.iter().filter_map(|class| match class.data {
+            self.xinput.valuators.extend(device.classes.iter().filter_map(|class| match class.data {
                 xinput::DeviceClassData::Valuator(val) => Some(((device.deviceid.value(), val.number), val)),
                 _ => None,
             }));
@@ -592,8 +605,7 @@ impl XContext {
                 self.update_mappings().await?;
             },
             ExtensionEvent::Core(xcore::Events::ConfigureNotify(event)) => {
-                self.event_queue.width = event.width;
-                self.event_queue.height = event.height;
+                self.event_queue.set_size(event.width, event.height);
             },
             ExtensionEvent::Core(xcore::Events::FocusOut(..)) => {
                 self.event_queue.push(XEvent::Focus(false));
@@ -601,56 +613,38 @@ impl XContext {
             ExtensionEvent::Core(xcore::Events::FocusIn(..)) => {
                 self.event_queue.push(XEvent::Focus(true));
             },
-            ExtensionEvent::Core(e @ xcore::Events::ButtonPress(..)) | ExtensionEvent::Core(e @ xcore::Events::ButtonRelease(..)) => {
-                let (pressed, event) = match e {
-                    xcore::Events::ButtonPress(event) => (true, event),
-                    xcore::Events::ButtonRelease(event) => (false, &event.0),
-                    _ => unsafe { core::hint::unreachable_unchecked() },
-                };
-                let event = XInputEvent {
-                    time: event.time,
-                    data: XInputEventData::Button {
-                        pressed,
-                        button: event.detail,
-                        state: event.state.get(),
-                    },
-                };
-                self.event_queue.push_x_event(&event)
+            ExtensionEvent::Core(xcore::Events::ButtonPress(event)) => {
+                self.event_queue.push_x_event(&self.xinput.process_event_buttonpress(event))
+            },
+            ExtensionEvent::Core(xcore::Events::ButtonRelease(event)) => {
+                self.event_queue.push_x_event(&self.xinput.process_event_buttonrelease(event))
             },
             ExtensionEvent::Core(xcore::Events::MotionNotify(event)) => {
                 if self.state.grabbed {
                     // TODO: proper filtering
                     return Ok(())
                 }
-                let event = XInputEvent {
-                    time: event.time,
-                    data: XInputEventData::Mouse {
-                        x: event.event_x,
-                        y: event.event_y,
-                    },
-                };
-                self.event_queue.push_x_event(&event)
+                self.event_queue.push_x_event(&self.xinput.process_event_motion(event))
             },
-            ExtensionEvent::Core(e @ xcore::Events::KeyPress(..)) | ExtensionEvent::Core(e @ xcore::Events::KeyRelease(..)) => {
-                let (pressed, event) = match e {
-                    xcore::Events::KeyPress(event) => (true, event),
-                    xcore::Events::KeyRelease(event) => (false, &event.0),
-                    _ => unsafe { core::hint::unreachable_unchecked() },
-                };
-
-                let keycode = self.keycode(event.detail);
-                let keysym = self.keysym(keycode);
-
-                let event = XInputEvent {
-                    time: event.time,
-                    data: XInputEventData::Key {
-                        pressed,
-                        keycode,
-                        keysym: if keysym == Some(0) { None } else { keysym },
-                        state: event.state.into(),
-                    },
-                };
-                self.event_queue.push_x_event(&event)
+            ExtensionEvent::Core(xcore::Events::KeyPress(event)) => {
+                self.event_queue.push_x_event(&self.xinput.process_event_keypress(event))
+            },
+            ExtensionEvent::Core(xcore::Events::KeyRelease(event)) => {
+                self.event_queue.push_x_event(&self.xinput.process_event_keyrelease(event))
+            },
+            ExtensionEvent::Input(xinput::Events::KeyPress(event)) => {
+                if !event.flags.get().contains(xinput::KeyEventFlags::KeyRepeat) {
+                    self.event_queue.push_x_event(&self.xinput.process_event_xi2_keypress(event))
+                }
+            },
+            ExtensionEvent::Input(xinput::Events::KeyRelease(event)) => {
+                self.event_queue.push_x_event(&self.xinput.process_event_xi2_keyrelease(event))
+            },
+            ExtensionEvent::Input(xinput::Events::ButtonPress(event)) => {
+                self.event_queue.push_x_event(&self.xinput.process_event_xi2_buttonpress(event))
+            },
+            ExtensionEvent::Input(xinput::Events::ButtonRelease(event)) => {
+                self.event_queue.push_x_event(&self.xinput.process_event_xi2_buttonrelease(event))
             },
             /*ExtensionEvent::Input(e @ xinput::Events::KeyPress(..)) | ExtensionEvent::Input(e @ xinput::Events::KeyRelease(..)) => {
                 let (pressed, event) = match e {
@@ -675,47 +669,14 @@ impl XContext {
                     self.event_queue.push_x_event(&event)
                 }
             },*/
+            ExtensionEvent::Input(xinput::Events::Motion(event)) => {
+                for event in self.xinput.process_event_xi2_motion(event) {
+                    self.event_queue.push_x_event(&event);
+                }
+            },
             ExtensionEvent::Input(xinput::Events::RawMotion(event)) => {
-                let event = &event.0;
-                let axis_info = self.valuator_info(event.deviceid.value())
-                    .ok_or_else(|| format_err!("XInput device unknown for event: {:?}", event))?;
-                // TODO: could be relative or abs?
-                // TODO: figure out which axis are scroll wheels via ScrollClass - there are multiple entries per valuator?
-                let mut values = event.axisvalues.iter().zip(&event.axisvalues_raw);
-                for &valuator_mask in &event.valuator_mask {
-                    for axis in iter_bits(valuator_mask)/*.zip(&mut values)*/ {
-                        let (value, value_raw) = values.next().unwrap();
-                        let valuator = match self.valuators.get(&(event.deviceid.value(), axis as u16)) {
-                            Some(val) => val,
-                            _ => continue,
-                        };
-                        let &xinput::Fp3232 { integral, frac } = value_raw;
-                        let value = value_raw.fixed_point();
-                        let event = XInputEvent {
-                            time: event.time.value(),
-                            data: match valuator.mode.get() {
-                                xinput::ValuatorMode::Relative => XInputEventData::MouseRelative {
-                                    axis: match axis {
-                                        // TODO: match by label instead? Are these indexes fixed?
-                                        0 => RelativeAxis::X,
-                                        1 => RelativeAxis::Y,
-                                        2 => RelativeAxis::Wheel,
-                                        3 => RelativeAxis::HorizontalWheel,
-                                        _ => continue,
-                                    },
-                                    value: (value / (1i64 << 30)) as i32,
-                                },
-                                xinput::ValuatorMode::Absolute => continue /*XInputEventData::Mouse {
-                                    axis: match axis {
-                                        0 => RelativeAxis::X,
-                                        1 => RelativeAxis::Y,
-                                    },
-                                    value: (value >> 2) as i32,
-                                }*/,
-                            },
-                        };
-                        self.event_queue.push_x_event(&event)
-                    }
+                for event in self.xinput.process_event_xi2_motion_raw(event) {
+                    self.event_queue.push_x_event(&event);
                 }
             },
             ExtensionEvent::Input(xinput::Events::DevicePresenceNotify(event)) => {

@@ -2,16 +2,16 @@ use screenstub_config::ConfigRect;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Bounds {
-    pub lower: i32,
-    pub upper: i32,
-    pub size: i32,
+    pub lower: u32,
+    pub upper: u32,
+    pub size: u32,
 }
 
 impl Bounds {
     pub fn new(l: f64, u: f64) -> Self {
         let scale = 0x7fff as f64;
-        let lower = (l * scale) as i32;
-        let upper = (u * scale) as i32;
+        let lower = (l * scale) as u32;
+        let upper = (u * scale) as u32;
 
         Self {
             lower,
