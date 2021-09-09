@@ -1,6 +1,9 @@
+use config::ConfigInputEvent;
+use enumflags2::BitFlags;
 use futures::{Sink, Stream, SinkExt, StreamExt, FutureExt};
 use anyhow::{Error, format_err};
 use xproto::protocol::*;
+use xproto::protocol::xcore::EventMask;
 use xproto::conversion::AsPrimitive;
 use std::collections::BTreeMap;
 use log::{trace, warn, info};
@@ -91,6 +94,9 @@ pub struct XContext {
     state: XState,
     display: xserver::Display,
 
+    config_mask_core: BitFlags<ConfigInputEvent>,
+    config_mask_xi: BitFlags<ConfigInputEvent>,
+
     event_queue: XEventQueue,
 
     atom_wm_state: xcore::Atom,
@@ -131,13 +137,17 @@ impl XContext {
             }).await.await?;
         }
 
-        let core_input_mask = if ext_input.is_some() {
-            Default::default()
-        } else {
-            xcore::EventMask::KeyPress | xcore::EventMask::KeyRelease
-                | xcore::EventMask::ButtonPress | xcore::EventMask::ButtonRelease
-                | xcore::EventMask::PointerMotion | xcore::EventMask::ButtonMotion
+        let config_mask_xi = match &ext_input {
+            Some((xinput, version)) if version >= &XInputVersion::_2_0 =>
+                BitFlags::all(),
+            xinput => {
+                if xinput.is_some() {
+                    warn!("XInput 1.x unsupported");
+                }
+                Default::default()
+            },
         };
+        let config_mask_core = BitFlags::all() & !config_mask_xi;
 
         sink.execute(xcore::CreateWindowRequest {
             depth: xcore::WindowClass::CopyFromParent.into(),
@@ -153,11 +163,7 @@ impl XContext {
                     background_pixel: screen.black_pixel,
                 }),
                 event_mask: Some(xcore::CreateWindowRequestValueListEventMask {
-                    event_mask: (core_input_mask
-                        | xcore::EventMask::VisibilityChange
-                        | xcore::EventMask::PropertyChange
-                        | xcore::EventMask::StructureNotify
-                        | xcore::EventMask::FocusChange).into(),
+                    event_mask: (Self::core_events() | Self::core_input_events(config_mask_core)).into(),
                 }),
                 .. Default::default()
             },
@@ -176,7 +182,7 @@ impl XContext {
                         },
                         xinput::EventMask {
                             deviceid: xinput::Device::AllMaster.into(),
-                            mask: version.events_mask(grab_raw),
+                            mask: version.events_mask(grab_raw, config_mask_xi),
                         },
                     ],
                 }).await.await?;
@@ -217,6 +223,8 @@ impl XContext {
             devices: Default::default(),
             grab_devices: Default::default(),
             grab_raw,
+            config_mask_core,
+            config_mask_xi,
             event_queue: Default::default(),
             ext_input,
             ext_test,
@@ -316,6 +324,31 @@ impl XContext {
             Err(format_err!("X failed to grab with status {:?}", status))
         }
     }
+
+    fn core_events() -> BitFlags<EventMask> {
+        EventMask::VisibilityChange
+            | EventMask::PropertyChange
+            | EventMask::StructureNotify
+            | EventMask::FocusChange
+    }
+
+    fn core_input_events(config_mask: BitFlags<ConfigInputEvent>) -> BitFlags<EventMask> {
+        let mut res = BitFlags::default();
+        if config_mask.contains(ConfigInputEvent::Key) {
+            res |= EventMask::KeyPress | EventMask::KeyRelease;
+        }
+        if config_mask.contains(ConfigInputEvent::Button) {
+            res |= EventMask::ButtonPress | EventMask::ButtonRelease;
+        }
+        if config_mask.contains(ConfigInputEvent::Relative) {
+            res |= EventMask::PointerMotion | EventMask::ButtonMotion;
+        }
+        res
+    }
+
+    /*fn event_mask(&self) -> BitFlags<EventMask> {
+        Self::core_events() | blah
+    }*/
 
     pub async fn process_request(&mut self, request: &XRequest) -> Result<(), Error> {
         trace!("processing X request {:?}", request);
@@ -670,12 +703,12 @@ impl XContext {
                 }
             },*/
             ExtensionEvent::Input(xinput::Events::Motion(event)) => {
-                for event in self.xinput.process_event_xi2_motion(event) {
+                for event in self.xinput.process_event_xi2_motion(event, self.config_mask_xi) {
                     self.event_queue.push_x_event(&event);
                 }
             },
             ExtensionEvent::Input(xinput::Events::RawMotion(event)) => {
-                for event in self.xinput.process_event_xi2_motion_raw(event) {
+                for event in self.xinput.process_event_xi2_motion_raw(event, self.config_mask_xi) {
                     self.event_queue.push_x_event(&event);
                 }
             },

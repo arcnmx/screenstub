@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use enumflags2::BitFlags;
 use input_linux::RelativeAxis;
 use xproto::protocol::*;
+use xproto::protocol::xinput::XIEventMask;
+use screenstub_config::ConfigInputEvent;
 use crate::{context::XSink, events::{XInputEvent, XInputEventData}};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -59,28 +61,44 @@ impl XInputVersion {
         })
     }
 
-    pub fn events_mask(&self, raw: bool) -> Vec<xproto::enums::Mask<xinput::XIEventMask, u32>> {
-        use xproto::protocol::xinput::XIEventMask;
-        let mut masks = vec![
-            XIEventMask::DeviceChanged.into(),
-        ];
-        if raw && self >= &Self::_2_1 {
-            masks.extend_from_slice(&[
+    pub fn events_mask(&self, raw: bool, config_mask: BitFlags<ConfigInputEvent>) -> Vec<xproto::enums::Mask<XIEventMask, u32>> {
+        let raw = raw && self >= &Self::_2_1;
+        let mut masks = Vec::with_capacity(5);
+
+        if config_mask.contains(ConfigInputEvent::Key) {
+            masks.extend_from_slice(&if raw { [
                 XIEventMask::RawKeyPress.into(),
                 XIEventMask::RawKeyRelease.into(),
-                XIEventMask::RawButtonPress.into(),
-                XIEventMask::RawButtonRelease.into(),
-                XIEventMask::RawMotion.into(),
-            ]);
-        } else {
-            masks.extend_from_slice(&[
+            ] } else { [
                 XIEventMask::KeyPress.into(),
                 XIEventMask::KeyRelease.into(),
+            ] });
+        }
+
+        if config_mask.contains(ConfigInputEvent::Button) {
+            masks.extend_from_slice(&if raw { [
+                XIEventMask::RawButtonPress.into(),
+                XIEventMask::RawButtonRelease.into(),
+            ] } else { [
                 XIEventMask::ButtonPress.into(),
                 XIEventMask::ButtonRelease.into(),
-                XIEventMask::Motion.into(),
-            ]);
+            ] });
         }
+
+        let has_motion = if config_mask.contains(ConfigInputEvent::Absolute) {
+            masks.push(XIEventMask::Motion.into());
+            true
+        } else {
+            false
+        };
+        if config_mask.intersects(ConfigInputEvent::Relative | ConfigInputEvent::Absolute) {
+            if raw {
+                masks.push(XIEventMask::RawMotion.into());
+            } else if !has_motion {
+                masks.push(XIEventMask::Motion.into());
+            }
+        }
+
         masks
     }
 }
@@ -171,19 +189,29 @@ impl XInput {
         }
     }
 
-    pub fn process_event_xi2_motion_raw<'a, 'e: 'a>(&'a self, event: &'e xinput::RawMotionEvent) -> impl Iterator<Item=XInputEvent> + 'a {
+    pub fn process_event_xi2_motion_raw<'a, 'e: 'a>(&'a self, event: &'e xinput::RawMotionEvent, mask: BitFlags<ConfigInputEvent>) -> impl Iterator<Item=XInputEvent> + 'a {
+        let relative = mask.contains(ConfigInputEvent::Relative);
         event.axisvalues_raw().filter_map(move |(number, axisvalue)|
-            self.process_event_xi2_motion_internal(event.time.value(), event.deviceid.value(), number, axisvalue)
+            self.process_event_xi2_motion_internal(event.time.value(), event.deviceid.value(), number, axisvalue, relative)
         )
     }
 
-    pub fn process_event_xi2_motion<'a, 'e: 'a>(&'a self, event: &'e xinput::MotionEvent) -> impl Iterator<Item=XInputEvent> + 'a {
+    pub fn process_event_xi2_motion<'a, 'e: 'a>(&'a self, event: &'e xinput::MotionEvent, mask: BitFlags<ConfigInputEvent>) -> impl Iterator<Item=XInputEvent> + 'a {
+        let relative = mask.contains(ConfigInputEvent::Relative);
         event.axisvalues().filter_map(move |(number, axisvalue)|
-            self.process_event_xi2_motion_internal(event.time.value(), event.deviceid.value(), number, axisvalue)
-        )
+            self.process_event_xi2_motion_internal(event.time.value(), event.deviceid.value(), number, axisvalue, relative)
+        ).chain(if !relative {
+            Some(XInputEvent {
+                time: event.time.value(),
+                data: XInputEventData::Mouse {
+                    x: event.event_x(),
+                    y: event.event_y(),
+                },
+            })
+        } else { None })
     }
 
-    fn process_event_xi2_motion_internal(&self, time: xcore::Timestamp, deviceid: xinput::DeviceId, axisnumber: u16, value: xinput::Fp3232) -> Option<XInputEvent> {
+    fn process_event_xi2_motion_internal(&self, time: xcore::Timestamp, deviceid: xinput::DeviceId, axisnumber: u16, value: xinput::Fp3232, relative: bool) -> Option<XInputEvent> {
         // TODO: could be relative or abs?
         // TODO: figure out which axis are scroll wheels via ScrollClass - there are multiple entries per valuator?
         let valuator = match self.valuators.get(&(deviceid, axisnumber)) {
@@ -193,8 +221,8 @@ impl XInput {
                 return None
             },
         };
-        Some(match valuator.mode.get() {
-            xinput::ValuatorMode::Relative => {
+        match valuator.mode.get() {
+            xinput::ValuatorMode::Relative if relative => Some({
                 let axis = match axisnumber {
                     // TODO: match by label instead? Are these indexes fixed?
                     0 => RelativeAxis::X,
@@ -210,9 +238,11 @@ impl XInput {
                         value,
                     },
                 }
-            },
-            _ => unimplemented!(),
-        })
+            }),
+            xinput::ValuatorMode::Absolute if !relative =>
+                unimplemented!(),
+            _ => None, // TODO: handle scrolling?
+        }
     }
 
     pub fn process_event_xi2_keypress(&self, event: &xinput::KeyPressEvent) -> XInputEvent {
