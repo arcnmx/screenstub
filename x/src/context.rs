@@ -559,7 +559,7 @@ impl XContext {
                             property: atom,
                             type_: xcore::GetPropertyType::Any.into(),
                             long_offset: 0,
-                            long_length: 0,
+                            long_length: 1,
                         }).await.await?;
                         let x = match &r.value {
                             xcore::GetPropertyReplyValue::Data32(d) => d.data.get(0),
