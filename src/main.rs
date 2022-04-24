@@ -17,7 +17,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::{future, TryFutureExt, FutureExt, StreamExt, SinkExt};
 use anyhow::{Error, format_err};
 use log::{warn, error, info};
-use clap::{Arg, App, SubCommand, AppSettings};
+use clap::{Arg, Command, AppSettings};
 use input::{InputId, Key, RelativeAxis, AbsoluteAxis, InputEvent, EventKind};
 use config::{Config, ConfigEvent, ConfigSourceName};
 use event::{Hotkey, UserEvent, ProcessedXEvent};
@@ -64,33 +64,33 @@ fn main() {
 async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
     env_logger::init();
 
-    let app = App::new("screenstub")
+    let app = Command::new("screenstub")
         .version(env!("CARGO_PKG_VERSION"))
         .author("arcnmx")
         .about("A software KVM")
-        .arg(Arg::with_name("config")
-            .short("c")
+        .arg(Arg::new("config")
+            .short('c')
             .long("config")
             .value_name("CONFIG")
             .takes_value(true)
             .help("Configuration TOML file")
-        ).arg(Arg::with_name("screen")
-            .short("s")
+        ).arg(Arg::new("screen")
+            .short('s')
             .long("screen")
             .value_name("SCREEN")
             .takes_value(true)
             .help("Configuration screen index")
-        ).subcommand(SubCommand::with_name("x")
+        ).subcommand(Command::new("x")
             .about("Start the KVM with a fullscreen X window")
-        ).subcommand(SubCommand::with_name("detect")
+        ).subcommand(Command::new("detect")
             .about("Detect available DDC/CI displays and their video inputs")
-        ).subcommand(SubCommand::with_name("source")
+        ).subcommand(Command::new("source")
             .about("Change the configured monitor input source")
-            .arg(Arg::with_name("confirm")
-                 .short("c")
+            .arg(Arg::new("confirm")
+                 .short('c')
                  .long("confirm")
                  .help("Check that the VM is running before switching input")
-            ).arg(Arg::with_name("source")
+            ).arg(Arg::new("source")
                 .value_name("DEST")
                 .takes_value(true)
                 .required(true)
@@ -114,7 +114,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
         .ok_or_else(|| format_err!("expected a screen config"))?;
 
     match matches.subcommand() {
-        ("x", Some(..)) => {
+        Some(("x", ..)) => {
             let xinstance = screen.x_instance.unwrap_or("auto".into());
 
             let (mut x_sender, mut x_receiver) = mpsc::channel(0x20);
@@ -343,7 +343,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
 
             res.map(|()| 0)
         },
-        ("detect", Some(..)) => {
+        Some(("detect", ..)) => {
             Monitor::enumerate()?.into_iter().try_for_each(|mut m| {
                 let sources = m.sources()?;
                 let current_source = m.get_source()?;
@@ -361,7 +361,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
 
             Ok(0)
         },
-        ("source", Some(matches)) => {
+        Some(("source", matches)) => {
             let ddc = screen.ddc.unwrap_or_default();
 
             let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));

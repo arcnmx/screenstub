@@ -41,52 +41,44 @@ impl RouteQmp {
 
     fn convert_event(e: &InputEvent, qkeycodes: &[u8]) -> Option<qmp::InputEvent> {
         Some(match EventRef::new(e) {
-            Ok(EventRef::Key(ref key)) if key.key.is_button() => qmp::InputEvent::btn {
-                data: qmp::InputBtnEvent {
-                    down: key.value.is_pressed(),
-                    button: match key.key {
-                        Key::ButtonLeft => qmp::InputButton::left,
-                        Key::ButtonMiddle => qmp::InputButton::middle,
-                        Key::ButtonRight => qmp::InputButton::right,
-                        Key::ButtonWheel => qmp::InputButton::wheel_down,
-                        Key::ButtonGearUp => qmp::InputButton::wheel_up,
-                        Key::ButtonSide => qmp::InputButton::side,
-                        Key::ButtonExtra => qmp::InputButton::extra,
-                        _ => return None, // TODO: warn/error/etc
-                    },
+            Ok(EventRef::Key(ref key)) if key.key.is_button() => qmp::InputEvent::btn(qmp::InputBtnEvent {
+                down: key.value.is_pressed(),
+                button: match key.key {
+                    Key::ButtonLeft => qmp::InputButton::left,
+                    Key::ButtonMiddle => qmp::InputButton::middle,
+                    Key::ButtonRight => qmp::InputButton::right,
+                    Key::ButtonWheel => qmp::InputButton::wheel_down,
+                    Key::ButtonGearUp => qmp::InputButton::wheel_up,
+                    Key::ButtonSide => qmp::InputButton::side,
+                    Key::ButtonExtra => qmp::InputButton::extra,
+                    _ => return None, // TODO: warn/error/etc
                 },
-            },
+            }.into()),
             Ok(EventRef::Key(KeyEvent { key: Key::Reserved, .. })) =>
                 return None, // ignore key 0 events
             Ok(EventRef::Key(ref key)) => match qkeycodes.get(key.key as usize) {
-                Some(&qnum) => qmp::InputEvent::key {
-                    data: qmp::InputKeyEvent {
-                        down: key.value.is_pressed(),
-                        key: qmp::KeyValue::number { data: qnum as _ },
-                    },
-                },
+                Some(&qnum) => qmp::InputEvent::key(qmp::InputKeyEvent {
+                    down: key.value.is_pressed(),
+                    key: qmp::KeyValue::number(qnum.into()),
+                }.into()),
                 None => return None,
             },
-            Ok(EventRef::Relative(rel)) => qmp::InputEvent::rel {
-                data: qmp::InputMoveEvent {
-                    axis: match rel.axis {
-                        RelativeAxis::X => qmp::InputAxis::x,
-                        RelativeAxis::Y => qmp::InputAxis::y,
-                        _ => return None, // TODO: warn/error/etc
-                    },
-                    value: rel.value as _,
+            Ok(EventRef::Relative(rel)) => qmp::InputEvent::rel(qmp::InputMoveEvent {
+                axis: match rel.axis {
+                    RelativeAxis::X => qmp::InputAxis::x,
+                    RelativeAxis::Y => qmp::InputAxis::y,
+                    _ => return None, // TODO: warn/error/etc
                 },
-            },
-            Ok(EventRef::Absolute(abs)) => qmp::InputEvent::abs {
-                data: qmp::InputMoveEvent {
-                    axis: match abs.axis {
-                        AbsoluteAxis::X => qmp::InputAxis::x,
-                        AbsoluteAxis::Y => qmp::InputAxis::y,
-                        _ => return None, // TODO: warn/error/etc
-                    },
-                    value: abs.value as _,
+                value: rel.value as _,
+            }.into()),
+            Ok(EventRef::Absolute(abs)) => qmp::InputEvent::abs(qmp::InputMoveEvent {
+                axis: match abs.axis {
+                    AbsoluteAxis::X => qmp::InputAxis::x,
+                    AbsoluteAxis::Y => qmp::InputAxis::y,
+                    _ => return None, // TODO: warn/error/etc
                 },
-            },
+                value: abs.value as _,
+            }.into()),
             _ => return None, // TODO: warn/error/etc
         })
     }
