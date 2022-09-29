@@ -12,4 +12,4 @@ futures = "^0.3.5"
 anyhow = "^1.0.42"
 log = "^0.4.1"
 tokio = { version = "^1.0.0", default-features = false, features = ["time", "sync"] }
-qapi = { version = "^0.9.0", features = ["qmp", "qga", "async-tokio-net", "async-tokio-spawn"] }
+qapi = { version = "^0.10.0", features = ["qmp", "qga", "async-tokio-net", "async-tokio-spawn"] }
