@@ -31,8 +31,10 @@ Additional configuration may be required for advanced usage:
 Requires a modern stable [Rust toolchain](https://www.rust-lang.org/en-US/install.html),
 and can be installed and run like so:
 
-    cargo install --force --git https://github.com/arcnmx/screenstub
-    screenstub -c config.yml x
+```bash
+cargo install --force --git https://github.com/arcnmx/screenstub
+screenstub -c config.yml x
+```
 
 ### Dependencies
 
@@ -58,10 +60,13 @@ control the VM and QEMU itself. This requires something similar to the following
 command-line flags to be passed to QEMU (note libvirt may already expose some of
 these for you):
 
-    -chardev socket,path=/tmp/vfio-qga,server,nowait,id=qga0
-    -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0
-    -chardev socket,path=/tmp/vfio-qmp,server,nowait,id=qmp0
-    -mon chardev=qmp0,id=qmp,mode=control
+```bash
+qemu-system-x86_64 \
+  -chardev socket,path=/tmp/vfio-qga,server,nowait,id=qga0 \
+  -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
+  -chardev socket,path=/tmp/vfio-qmp,server,nowait,id=qmp0 \
+  -mon chardev=qmp0,id=qmp,mode=control
+```
 
 ### Guest Input Devices
 
@@ -138,15 +143,19 @@ VM. It can be built from from source, or you may [download a compiled installer
 here](https://github.com/arcnmx/aur-qemu-guest-agent-windows/releases).
 
 It is recommended that you disable the default qemu-ga system service, and
-instead schedule it to run on user login. I run the following in a batch script
-on startup:
+instead schedule it to run on user login. I run the following in a powershell
+script on startup:
 
-    powershell -Command "Start-Process \"C:\Program Files\Qemu-ga\qemu-ga.exe\" -WindowStyle Hidden"
+```powershell
+Start-Process "C:\Program Files\Qemu-ga\qemu-ga.exe" -WindowStyle Hidden
+```
 
 This needs to run as admin, so you can use task scheduler for that pointing to
-a batch file containing the above:
+a script containing the above:
 
-    schtasks /create /sc onlogon /tn qemu-ga /rl highest /tr "C:\path\to\qemu-ga.bat"
+```bat
+schtasks /create /sc onlogon /tn qemu-ga /rl highest /tr "powershell C:\path\to\qemu-ga.ps1"
+```
 
 ### macOS
 
