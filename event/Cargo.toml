@@ -8,7 +8,7 @@ include = [
 ]
 
 [dependencies]
-input-linux = "^0.5.0"
-smallvec = "^1.4.1"
+input-linux = "0.5"
+smallvec = "1"
 screenstub-x = { path = "../x" }
-log = "^0.4.1"
+log = "0.4"
