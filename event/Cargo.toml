@@ -3,6 +3,10 @@ name = "screenstub-event"
 version = "0.0.1"
 edition = "2018"
 
+include = [
+	"/src/**/*.rs",
+]
+
 [dependencies]
 input-linux = "^0.5.0"
 smallvec = "^1.4.1"

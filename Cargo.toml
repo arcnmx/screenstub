@@ -3,6 +3,12 @@ name = "screenstub"
 version = "0.1.0"
 edition = "2018"
 
+include = [
+	"/src/**/*.rs",
+	"/README*",
+	"/COPYING*",
+]
+
 [dependencies]
 screenstub-config = { path = "config" }
 screenstub-uinput = { path = "uinput" }

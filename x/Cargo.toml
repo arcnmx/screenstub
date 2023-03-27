@@ -3,6 +3,10 @@ name = "screenstub-x"
 version = "0.0.1"
 edition = "2018"
 
+include = [
+	"/src/**/*.rs",
+]
+
 [dependencies]
 screenstub-fd = { version = "^0.0.1", path = "../fd" }
 futures = { version = "^0.3.4", features = ["bilock", "unstable"] }

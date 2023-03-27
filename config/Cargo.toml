@@ -3,6 +3,11 @@ name = "screenstub-config"
 version = "0.0.1"
 edition = "2018"
 
+include = [
+	"/src/**/*.rs",
+	"/keymaps.csv",
+]
+
 [dependencies]
 serde = { version = "^1.0.27", features = ["derive"] }
 serde-hex = "^0.1.0"

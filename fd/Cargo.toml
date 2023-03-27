@@ -2,3 +2,7 @@
 name = "screenstub-fd"
 version = "0.0.1"
 edition = "2018"
+
+include = [
+	"/src/**/*.rs",
+]

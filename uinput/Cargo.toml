@@ -3,6 +3,10 @@ name = "screenstub-uinput"
 version = "0.0.1"
 edition = "2018"
 
+include = [
+	"/src/**/*.rs",
+]
+
 [dependencies]
 screenstub-fd = { version = "^0.0.1", path = "../fd" }
 input-linux = { version = "^0.5.0", features = ["with-tokio"] }
