@@ -16,6 +16,9 @@ in {
     };
     tasks = {
       build.inputs = singleton screenstub-checked;
+      check-config.inputs = singleton (checks.check-config.override {
+        screenstub = screenstub-checked;
+      });
     };
     jobs = {
       nixos = {

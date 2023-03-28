@@ -10,6 +10,7 @@ use input::{Key, InputEvent, EventRef};
 pub mod keymap;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub screens: Vec<ConfigScreen>,
@@ -27,6 +28,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigScreen {
     #[serde(default)]
     pub monitor: ConfigMonitor,
@@ -85,6 +87,7 @@ impl Default for ConfigDdc {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigDdc {
     #[serde(default = "ConfigDdcMethod::default_host")]
     pub host: Vec<ConfigDdcMethod>,
@@ -101,6 +104,7 @@ impl ConfigDdc {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigQemu {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ga_socket: Option<String>,
@@ -158,7 +162,7 @@ impl ConfigQemu {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase", remote = "ConfigQemuDriver")]
+#[serde(deny_unknown_fields, rename_all = "lowercase", remote = "ConfigQemuDriver")]
 pub enum ConfigQemuDriver {
     Ps2,
     Usb,
@@ -233,6 +237,7 @@ impl ConfigQemuRouting {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigHotkey {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<Key>,
@@ -310,7 +315,7 @@ impl ConfigInputEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct ConfigInputDevice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u16>,
@@ -328,7 +333,7 @@ fn true_() -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase", remote = "ConfigGrab")]
+#[serde(deny_unknown_fields, rename_all = "lowercase", remote = "ConfigGrab")]
 pub enum ConfigGrab {
     X {
         #[serde(default = "true_")]
@@ -436,6 +441,7 @@ impl Default for ConfigGrabMode {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigMonitor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -452,6 +458,7 @@ pub struct ConfigMonitor {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<u8>,

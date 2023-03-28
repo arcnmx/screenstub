@@ -73,6 +73,12 @@
         inherit (screenstub) src;
         config = ./.rustfmt.toml;
       };
+      check-config = { screenstub, runCommand }: runCommand "screenstub-check-config" {
+        nativeBuildInputs = [ screenstub ];
+        sampleConfig = ./samples/config.yml;
+      } ''
+        screenstub --config $sampleConfig check-config > $out
+      '';
     };
     lib = with nixlib; {
       crate = rust.lib.importCargo {

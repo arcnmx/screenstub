@@ -82,6 +82,8 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             .help("Configuration screen index")
         ).subcommand(Command::new("x")
             .about("Start the KVM with a fullscreen X window")
+        ).subcommand(Command::new("check-config")
+            .about("Read config and exit")
         ).subcommand(Command::new("detect")
             .about("Detect available DDC/CI displays and their video inputs")
         ).subcommand(Command::new("source")
@@ -342,6 +344,9 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             ).await?;
 
             res.map(|()| 0)
+        },
+        Some(("check-config", ..)) => {
+            Ok(0)
         },
         Some(("detect", ..)) => {
             Monitor::enumerate()?.into_iter().try_for_each(|mut m| {
