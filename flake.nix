@@ -91,5 +91,32 @@
     config = rec {
       name = "screenstub";
     };
-  };
+    overlays = {
+      screenstub = final: prev: {
+        screenstub = final.callPackage ./derivation.nix {
+          inherit (self.lib) crate;
+        };
+      };
+      default = self.overlays.screenstub;
+    };
+  } // (let
+    config = {
+      _module.args.inputs'screenstub = nixlib.mkDefault self;
+    };
+  in {
+    nixosModules = {
+      screenstub = { lib, ... }: {
+        imports = [ ./nixos.nix ];
+        inherit config;
+      };
+      default = self.nixosModules.screenstub;
+    };
+    homeModules = {
+      screenstub = { lib, ... }: {
+        imports = [ ./home.nix ];
+        inherit config;
+      };
+      default = self.homeModules.screenstub;
+    };
+  });
 }
