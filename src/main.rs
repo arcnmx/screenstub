@@ -10,6 +10,7 @@ extern crate screenstub_x as x;
 
 use std::process::exit;
 use std::time::Duration;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::io::{self, Write};
@@ -17,7 +18,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::{future, TryFutureExt, FutureExt, StreamExt, SinkExt};
 use anyhow::{Error, format_err};
 use log::{warn, error, info};
-use clap::{Arg, Command, AppSettings};
+use clap::{Arg, Command, value_parser};
 use input::{InputId, Key, RelativeAxis, AbsoluteAxis, InputEvent, EventKind};
 use config::{Config, ConfigEvent, ConfigSourceName};
 use event::{Hotkey, UserEvent, ProcessedXEvent};
@@ -72,13 +73,15 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             .short('c')
             .long("config")
             .value_name("CONFIG")
-            .takes_value(true)
+            .num_args(1)
+            .value_parser(value_parser!(PathBuf))
             .help("Configuration TOML file")
         ).arg(Arg::new("screen")
             .short('s')
             .long("screen")
             .value_name("SCREEN")
-            .takes_value(true)
+            .num_args(1)
+            .value_parser(value_parser!(usize))
             .help("Configuration screen index")
         ).subcommand(Command::new("x")
             .about("Start the KVM with a fullscreen X window")
@@ -94,15 +97,15 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
                  .help("Check that the VM is running before switching input")
             ).arg(Arg::new("source")
                 .value_name("DEST")
-                .takes_value(true)
+                .num_args(1)
                 .required(true)
-                .possible_values(&["host", "guest"])
+                .value_parser(["host", "guest"])
                 .help("Switch to either the host or guest monitor input")
             )
-        ).setting(AppSettings::SubcommandRequiredElseHelp);
+        ).subcommand_required(true);
 
     let matches = app.get_matches();
-    let config = if let Some(config) = matches.value_of("config") {
+    let config = if let Some(config) = matches.get_one::<PathBuf>("config") {
         use std::fs::File;
 
         let f = File::open(config)?;
@@ -111,8 +114,8 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
         Config::default()
     };
 
-    let screen_index = matches.value_of("screen").map(|s| s.parse()).unwrap_or(Ok(0))?;
-    let screen = config.screens.into_iter().nth(screen_index)
+    let screen_index = matches.get_one("screen").unwrap_or(&0usize);
+    let screen = config.screens.into_iter().nth(*screen_index)
         .ok_or_else(|| format_err!("expected a screen config"))?;
 
     match matches.subcommand() {
@@ -372,7 +375,7 @@ async fn main_result(spawner: &Arc<Spawner>) -> Result<i32, Error> {
             let qemu = Arc::new(Qemu::new(config.qemu.qmp_socket, config.qemu.ga_socket));
             let sources = Sources::new(qemu, screen.monitor, screen.host_source, screen.guest_source, ddc.host, ddc.guest, ddc.minimal_delay);
 
-            match matches.value_of("source") {
+            match matches.get_one::<String>("source").map(|s| &s[..]) {
                 Some("host") => sources.show(true, true).await,
                 Some("guest") => sources.show(false, true).await,
                 _ => unreachable!("unknown source to switch to"),
