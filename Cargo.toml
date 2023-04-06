@@ -27,7 +27,7 @@ serde_yaml = "^0.8.13"
 enumflags2 = "^0.6.4"
 result = "^1.0.0"
 ctrlc = { version = "^3.1.9", features = ["termination"] }
-qapi = { version = "^0.10.0", features = ["qmp", "qga"] }
+qapi = { version = "0.11", features = ["qmp", "qga"] }
 
 [features]
 with-ddcutil = ["screenstub-ddc/with-ddcutil", "screenstub-config/with-ddcutil"]

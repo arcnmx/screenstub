@@ -507,7 +507,7 @@ dependencies = [
  "input-linux-sys",
  "nix",
  "serde",
- "tokio-util 0.6.10",
+ "tokio-util",
 ]
 
 [[package]]
@@ -761,9 +761,9 @@ dependencies = [
 
 [[package]]
 name = "qapi"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2af7500ddb3834b02daaf91b7eee33774c58438497f145d54d9bd36b7dd51241"
+checksum = "42d41564a987591d45eff3a08276dfcea872c1bdebda0491238145df90b5f183"
 dependencies = [
  "bytes",
  "futures",
@@ -775,7 +775,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-util 0.7.7",
+ "tokio-util",
 ]
 
 [[package]]
@@ -810,9 +810,9 @@ dependencies = [
 
 [[package]]
 name = "qapi-qmp"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79908e8484a75172426d89b871a36e301c7f7d57615b61ea1afe033e978d6417"
+checksum = "880760acd8db07239b17051ec801bfb204f81efd269af538aeea242121b244a9"
 dependencies = [
  "qapi-codegen",
  "qapi-spec",
@@ -961,7 +961,7 @@ dependencies = [
  "log",
  "screenstub-fd",
  "tokio",
- "tokio-util 0.6.10",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1182,20 +1182,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.13",
-]
-
-[[package]]
-name = "tokio-util"
-version = "0.6.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36943ee01a6d67977dd3f84a5a1d2efeb4ada3a1ae771cadfaa535d9d9fc6507"
-dependencies = [
- "bytes",
- "futures-core",
- "futures-sink",
- "log",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]

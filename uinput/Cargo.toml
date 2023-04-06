@@ -9,10 +9,10 @@ include = [
 
 [dependencies]
 screenstub-fd = { version = "^0.0.1", path = "../fd" }
-input-linux = { version = "0.6", features = ["tokio-util-0_6"] }
+input-linux = { version = "0.6", features = ["tokio-util-0_7"] }
 futures = { version = "^0.3.4", features = ["bilock", "unstable"] }
-tokio = { version = "^1.0.0", default-features = false, features = ["macros", "time", "io-util", "rt"] }
-tokio-util = { version = "^0.6.0", default-features = false, features = [ "codec" ] }
-bytes = "^1.0.0"
+tokio = { version = "1", default-features = false, features = ["macros", "time", "io-util", "rt"] }
+tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
+bytes = "1"
 log = "^0.4.1"
 libc = "^0.2.36"
